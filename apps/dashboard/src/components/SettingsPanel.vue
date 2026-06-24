@@ -1,0 +1,919 @@
+<script setup lang="ts">
+  import type { TabId } from './settings-panel'
+  import type {
+    LogStatus,
+    SessionStats,
+    ShiftHistoryItem,
+    TelemetrySnapshot,
+  } from '@/types/telemetry'
+  import type { ConfigMap, SystemLog, TelemetryLog } from '@/types/ws'
+  import { HUD_TEMPLATES } from '@virtual-tcu/shared/config/hud'
+  import FeatureToggleList from '@virtual-tcu/ui/settings/FeatureToggleList.vue'
+  import UdpHubTargetsField from '@virtual-tcu/ui/settings/UdpHubTargetsField.vue'
+  import {
+    NButton,
+    NCard,
+    NFlex,
+    NInput,
+    NRadioButton,
+    NRadioGroup,
+    NSelect,
+    NSlider,
+    NSwitch,
+    NTabPane,
+    NTabs,
+    NTag,
+    NText,
+  } from 'naive-ui'
+  import { computed, nextTick, ref, toRefs, watch } from 'vue'
+  import {
+    CLUTCH_ASSIST_FIELDS,
+    CLUTCH_TIMING_SLIDERS,
+    FEATURE_TOGGLES,
+    HOTKEY_FIELDS,
+    OUTPUT_MODE_OPTIONS,
+    SETTING_GROUPS,
+    SHIFT_KEY_FIELDS,
+    VJOY_BUTTON_OPTIONS,
+    VJOY_SHIFT_BUTTON_FIELDS,
+  } from '@/config/settings'
+  import { useNetworkSettings } from './network-settings'
+
+  import {
+    sliderUnit,
+    TAB_IDS,
+    useConfirmReset,
+    useNetworkSaveAction,
+    useSettingsPanel,
+  } from './settings-panel'
+
+  const props = withDefaults(
+    defineProps<{
+      config: ConfigMap
+      telemetry?: TelemetrySnapshot | null
+      sessionStats?: SessionStats | null
+      shiftHistory?: ShiftHistoryItem[]
+      watchdogStuck?: boolean
+      logStatus?: LogStatus | null
+      visibleTabs?: string[]
+      initialTab?: string
+      hideTabBar?: boolean
+      systemLogs?: SystemLog[]
+      telemetryLogs?: TelemetryLog[]
+    }>(),
+    {
+      telemetry: null,
+      sessionStats: null,
+      shiftHistory: () => [],
+      watchdogStuck: false,
+      logStatus: null,
+      visibleTabs: () => [...TAB_IDS],
+      initialTab: '',
+      hideTabBar: false,
+      systemLogs: () => [],
+      telemetryLogs: () => [],
+    },
+  )
+  const emit = defineEmits([
+    'setConfig',
+    'saveNetworkAndRestart',
+    'resetConfig',
+    'exportProfile',
+    'openImport',
+    'restartBackend',
+    'logStart',
+    'logStop',
+    'triggerFusionSnapshot',
+  ])
+
+  const { config, telemetry, sessionStats, shiftHistory, visibleTabs } = toRefs(props)
+
+  const {
+    activeTab,
+    slidersFor,
+    statsRows,
+    historyItems,
+    configValue,
+    configBool,
+    configText,
+    sliderDef,
+  } = useSettingsPanel(
+    () => config.value,
+    () => telemetry.value,
+    () => sessionStats.value,
+    () => shiftHistory.value,
+  )
+
+  if (props.initialTab && (props.visibleTabs ?? TAB_IDS).includes(props.initialTab)) {
+    activeTab.value = props.initialTab as TabId
+  } else if (props.visibleTabs?.length && !props.visibleTabs.includes(activeTab.value)) {
+    activeTab.value = props.visibleTabs[0] as TabId
+  }
+
+  const extrasSliders = computed(() => slidersFor('extras'))
+
+  const {
+    draftHost: networkDraftHost,
+    draftWebPort: networkDraftWebPort,
+    draftUdpPort: networkDraftUdpPort,
+    draftUdpHubEnabled: networkDraftUdpHubEnabled,
+    draftUdpHubTargetTags: networkDraftUdpHubTargetTags,
+    udpHubTagError: networkUdpHubTagError,
+    dirty: networkDirty,
+    applyError: networkApplyError,
+    allowsBindHostInput: allowsNetworkBindHostInput,
+    allowsPortInput: allowsNetworkPortInput,
+    allowsUdpHubTargetInput: allowsNetworkUdpHubTargetInput,
+    setUdpHubEnabled: setNetworkUdpHubEnabled,
+    setUdpHubTargetTags: setNetworkUdpHubTargetTags,
+    onCreateUdpHubTag: onNetworkUdpHubTagCreate,
+    validate: validateNetwork,
+  } = useNetworkSettings(() => config.value)
+
+  const { saveNetworkAndRestart } = useNetworkSaveAction(validateNetwork, emit)
+
+  const { confirmReset } = useConfirmReset(() => emit('resetConfig'))
+
+  const logView = ref<'system' | 'telemetry'>('system')
+  const logRecordMode = ref<'events' | 'all'>('events')
+  const autoScroll = ref(true)
+  const telemetryStreaming = ref(false)
+  const telemetryPacketLogs = ref<string[]>([])
+  const sysLogRef = ref<HTMLElement | null>(null)
+  const logFormatOptions = [
+    { label: 'bin.gz', value: 'bin.gz' },
+    { label: 'bin', value: 'bin' },
+    { label: 'txt', value: 'txt' },
+    { label: 'json', value: 'json' },
+    { label: 'jsonl', value: 'jsonl' },
+    { label: 'csv', value: 'csv' },
+    { label: 'chart.html', value: 'csv_chart' },
+    { label: 'summary', value: 'summary' },
+  ]
+  const logFormat = computed({
+    get: () => String(config.value.log_output_format ?? props.logStatus?.format ?? 'bin.gz'),
+    set: (value: string) => emit('setConfig', 'log_output_format', value),
+  })
+  const isRecording = computed(() => !!props.logStatus?.recording)
+
+  function localLogTime(ts: number) {
+    const date = new Date(ts)
+    const hh = String(date.getHours()).padStart(2, '0')
+    const mm = String(date.getMinutes()).padStart(2, '0')
+    const ss = String(date.getSeconds()).padStart(2, '0')
+    const ms = String(date.getMilliseconds()).padStart(3, '0')
+    return `${hh}:${mm}:${ss}.${ms}`
+  }
+
+  function startLogRecording() {
+    emit('setConfig', 'log_output_format', logFormat.value)
+    emit('logStart', logRecordMode.value)
+  }
+
+  function stopLogRecording() {
+    emit('logStop', 'file')
+  }
+
+  function stopAsFusionSnapshot() {
+    emit('logStop', 'fusion_snapshot')
+  }
+
+  function formatTelemetryPacket(td: TelemetrySnapshot) {
+    return [
+      `[${localLogTime(Date.now())}]`,
+      `gear=${td.gear}`,
+      `speed=${td.speed_kmh.toFixed(1)}km/h`,
+      `rpm=${Math.round(td.rpm)}/${Math.round(td.rpm_max)}`,
+      `throttle=${Math.round(td.throttle * 100)}%`,
+      `brake=${Math.round(td.brake * 100)}%`,
+      `state=${td.tcu_state}`,
+    ].join(' ')
+  }
+
+  watch(
+    () => props.systemLogs?.length,
+    () => {
+      if (logView.value === 'system' && autoScroll.value && sysLogRef.value) {
+        nextTick(() => {
+          sysLogRef.value!.scrollTop = sysLogRef.value!.scrollHeight
+        })
+      }
+    },
+  )
+
+  watch(
+    () => telemetry.value,
+    (td) => {
+      if (!telemetryStreaming.value || !td) return
+      telemetryPacketLogs.value.push(formatTelemetryPacket(td))
+      if (telemetryPacketLogs.value.length > 300) {
+        telemetryPacketLogs.value.splice(0, telemetryPacketLogs.value.length - 300)
+      }
+    },
+  )
+</script>
+
+<template>
+  <div class="flex flex-col gap-4 p-4">
+    <NTabs v-if="!hideTabBar" v-model:value="activeTab" type="line" size="small">
+      <NTabPane v-for="tab in visibleTabs" :key="tab" :name="tab" :tab="$t(`tabs.${tab}`)">
+        <!-- settings tab -->
+        <template v-if="tab === 'settings'">
+          <NFlex vertical :size="16">
+            <div
+              v-if="watchdogStuck"
+              class="border-warn bg-warn/15 text-warn rounded-lg border px-3.5 py-2.5 text-sm before:font-bold before:content-['⚠_']"
+            >
+              {{ $t('settings.watchdog') }}
+            </div>
+
+            <NCard :title="$t('settings.features')" size="small" :bordered="false">
+              <FeatureToggleList
+                :toggles="FEATURE_TOGGLES"
+                :config-bool="configBool"
+                :columns="1"
+                @set-config="(key, v) => emit('setConfig', key, v)"
+              />
+            </NCard>
+
+            <NCard
+              v-for="group in SETTING_GROUPS"
+              :key="group.i18nKey"
+              :title="$t(`settings.${group.i18nKey}`)"
+              size="small"
+              :bordered="false"
+            >
+              <template v-if="group.hintKey">
+                <NText depth="3" style="font-size: 11px; display: block; margin-bottom: 8px">
+                  {{ $t(`settings.${group.hintKey}`) }}
+                </NText>
+              </template>
+              <NFlex vertical :size="14">
+                <div v-for="key in group.keys" :key="key">
+                  <NFlex justify="space-between" align="center" style="margin-bottom: 4px">
+                    <NText>{{ $t(`settings.${sliderDef(key)?.i18nKey ?? key}`) }}</NText>
+                    <NText code style="font-family: ui-monospace, monospace">
+                      {{ configValue(key) }}{{ sliderUnit(sliderDef(key) ?? {}) }}
+                    </NText>
+                  </NFlex>
+                  <NSlider
+                    :value="configValue(key)"
+                    :min="sliderDef(key)?.min ?? 0"
+                    :max="sliderDef(key)?.max ?? 100"
+                    :step="sliderDef(key)?.step ?? 1"
+                    @update:value="emit('setConfig', key, $event)"
+                  />
+                </div>
+              </NFlex>
+            </NCard>
+
+            <NCard size="small" :bordered="false">
+              <NFlex justify="space-between" align="center">
+                <NText depth="3" style="font-size: 12px">
+                  {{ $t('settings.autosave') }}
+                </NText>
+                <NButton type="error" ghost size="small" @click="confirmReset">
+                  {{ $t('settings.reset') }}
+                </NButton>
+              </NFlex>
+            </NCard>
+          </NFlex>
+        </template>
+
+        <!-- stats tab -->
+        <template v-if="tab === 'stats'">
+          <NFlex vertical :size="16">
+            <NCard :title="$t('stats.title')" size="small" :bordered="false">
+              <template v-if="statsRows">
+                <NFlex vertical :size="6">
+                  <NFlex justify="space-between" align="center">
+                    <NText depth="3">{{ $t('stats.duration') }}</NText>
+                    <NText code>{{ statsRows.duration }}</NText>
+                  </NFlex>
+                  <NFlex justify="space-between" align="center">
+                    <NText depth="3">{{ $t('stats.totalShifts') }}</NText>
+                    <NText code>{{ statsRows.total }}</NText>
+                  </NFlex>
+                  <NFlex justify="space-between" align="center">
+                    <NText depth="3">{{ $t('stats.upshifts') }}</NText>
+                    <NText code>{{ statsRows.upshifts }}</NText>
+                  </NFlex>
+                  <NFlex justify="space-between" align="center">
+                    <NText depth="3">{{ $t('stats.downshifts') }}</NText>
+                    <NText code>{{ statsRows.downshifts }}</NText>
+                  </NFlex>
+                  <NFlex justify="space-between" align="center">
+                    <NText depth="3">{{ $t('stats.kickdowns') }}</NText>
+                    <NText code>{{ statsRows.kickdowns }}</NText>
+                  </NFlex>
+                  <NFlex justify="space-between" align="center">
+                    <NText depth="3">{{ $t('stats.brakeDowns') }}</NText>
+                    <NText code>{{ statsRows.brakeDowns }}</NText>
+                  </NFlex>
+                  <NFlex justify="space-between" align="center">
+                    <NText depth="3">{{ $t('stats.predictives') }}</NText>
+                    <NText code>{{ statsRows.predictives }}</NText>
+                  </NFlex>
+                  <NFlex justify="space-between" align="center">
+                    <NText depth="3">{{ $t('stats.launches') }}</NText>
+                    <NText code>{{ statsRows.launches }}</NText>
+                  </NFlex>
+                </NFlex>
+              </template>
+            </NCard>
+
+            <NCard v-if="statsRows" :title="$t('stats.performance')" size="small" :bordered="false">
+              <NFlex vertical :size="6">
+                <NFlex justify="space-between" align="center">
+                  <NText depth="3">{{ $t('stats.peakRpm') }}</NText>
+                  <NText code>{{ statsRows.peakRpm }}</NText>
+                </NFlex>
+                <NFlex justify="space-between" align="center">
+                  <NText depth="3">{{ $t('stats.peakSpeed') }}</NText>
+                  <NText code>{{ statsRows.peakSpeed }} km/h</NText>
+                </NFlex>
+                <NFlex justify="space-between" align="center">
+                  <NText depth="3">{{ $t('stats.peakGLat') }}</NText>
+                  <NText code>{{ statsRows.peakGLat }}</NText>
+                </NFlex>
+                <NFlex justify="space-between" align="center">
+                  <NText depth="3">{{ $t('stats.peakGLon') }}</NText>
+                  <NText code>{{ statsRows.peakGLon }}</NText>
+                </NFlex>
+                <NFlex justify="space-between" align="center">
+                  <NText depth="3">{{ $t('stats.peakPower') }}</NText>
+                  <NText code>{{ statsRows.peakPower }} kW</NText>
+                </NFlex>
+                <NFlex justify="space-between" align="center">
+                  <NText depth="3">{{ $t('stats.avgThrottle') }}</NText>
+                  <NText code>{{ statsRows.avgThr }}%</NText>
+                </NFlex>
+                <NFlex justify="space-between" align="center">
+                  <NText depth="3">{{ $t('stats.carsDriven') }}</NText>
+                  <NText code>{{ statsRows.cars }}</NText>
+                </NFlex>
+              </NFlex>
+            </NCard>
+
+            <NCard v-if="statsRows" :title="$t('stats.learning')" size="small" :bordered="false">
+              <NFlex vertical :size="6">
+                <NFlex justify="space-between" align="center">
+                  <NText depth="3">{{ $t('stats.gearRatios') }}</NText>
+                  <NText code>{{
+                    statsRows.calib ? $t('stats.learned') : $t('stats.learningStatus')
+                  }}</NText>
+                </NFlex>
+                <NFlex justify="space-between" align="center">
+                  <NText depth="3">{{ $t('stats.powerCurve') }}</NText>
+                  <NText code>{{
+                    statsRows.powerLearned ? $t('stats.learned') : $t('stats.learningStatus')
+                  }}</NText>
+                </NFlex>
+              </NFlex>
+            </NCard>
+          </NFlex>
+        </template>
+
+        <!-- history tab -->
+        <template v-if="tab === 'history'">
+          <NCard :title="$t('history.title')" size="small" :bordered="false">
+            <div class="flex max-h-60 flex-col gap-1 overflow-y-auto">
+              <div
+                v-if="historyItems.length === 0"
+                class="text-tcu-txt-dim py-5 text-center text-xs"
+              >
+                {{ $t('history.empty') }}
+              </div>
+              <div
+                v-for="(h, i) in historyItems"
+                :key="i"
+                class="border-tcu-border bg-tcu-bg-1 grid grid-cols-[auto_auto_1fr_auto] items-center gap-2.5 rounded-md border px-2.5 py-1.5 font-mono text-[11px]"
+              >
+                <span
+                  class="text-sm font-bold"
+                  :class="h.action === 'UP' ? 'text-accent' : 'text-warn'"
+                >
+                  {{ h.action === 'UP' ? '↑' : '↓' }}
+                </span>
+                <span class="text-tcu-txt-muted">gear {{ h.gear }}</span>
+                <span class="text-tcu-txt-dim text-[10px] tracking-wide uppercase">{{
+                  h.reason || h.rule
+                }}</span>
+                <span class="text-tcu-txt-dim text-right text-[10px]">
+                  {{ new Date(h.ts * 1000).toTimeString().slice(0, 8) }} · {{ h.rpm_pct }}% ·
+                  {{ h.throttle }}%T {{ h.brake }}%B
+                </span>
+              </div>
+            </div>
+          </NCard>
+        </template>
+
+        <!-- logs tab -->
+        <template v-if="tab === 'logs'">
+          <NFlex vertical :size="16">
+            <NCard :title="$t('logs.recordingTitle')" size="small" :bordered="false">
+              <NFlex justify="space-between" align="center" wrap :size="10">
+                <NTag :type="isRecording ? 'error' : 'default'" round :bordered="false">
+                  {{ isRecording ? $t('logger.recording') : $t('logger.stopped') }}
+                </NTag>
+                <NText code style="font-family: ui-monospace, monospace">
+                  {{ props.logStatus?.packets ?? 0 }} pkts · {{ props.logStatus?.size_kb ?? 0 }} KB
+                </NText>
+              </NFlex>
+
+              <NFlex align="center" wrap :size="10" style="margin-top: 12px">
+                <NRadioGroup v-model:value="logRecordMode" size="small" :disabled="isRecording">
+                  <NRadioButton value="events" :label="$t('logger.startEvents')" />
+                  <NRadioButton value="all" :label="$t('logger.startAll')" />
+                </NRadioGroup>
+                <NSelect
+                  v-model:value="logFormat"
+                  :options="logFormatOptions"
+                  size="small"
+                  :disabled="isRecording"
+                  style="width: 132px"
+                />
+                <NButton
+                  type="primary"
+                  size="small"
+                  :disabled="isRecording"
+                  @click="startLogRecording"
+                >
+                  {{ $t('logs.startRecording') }}
+                </NButton>
+                <NButton
+                  type="error"
+                  ghost
+                  size="small"
+                  :disabled="!isRecording"
+                  @click="stopLogRecording"
+                >
+                  {{ $t('logs.stopSaveFile') }}
+                </NButton>
+                <NButton
+                  type="warning"
+                  ghost
+                  size="small"
+                  :disabled="!isRecording"
+                  @click="stopAsFusionSnapshot"
+                >
+                  {{ $t('logs.stopSaveFusionSnapshot') }}
+                </NButton>
+              </NFlex>
+
+              <NText depth="3" style="display: block; margin-top: 8px; font-size: 11px">
+                {{ $t('logs.currentFile') }} {{ props.logStatus?.file ?? $t('logs.noActiveFile') }}
+              </NText>
+            </NCard>
+
+            <NCard
+              size="small"
+              :bordered="false"
+              style="
+                padding: 0;
+                background: #18181c;
+                font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+              "
+            >
+              <template #header>
+                <NFlex justify="space-between" align="center">
+                  <NRadioGroup v-model:value="logView" size="small">
+                    <NRadioButton value="system" :label="$t('logs.systemLogs')" />
+                    <NRadioButton value="telemetry" :label="$t('logs.telemetryLogs')" />
+                  </NRadioGroup>
+                  <NFlex :size="8">
+                    <NButton
+                      v-if="logView === 'telemetry'"
+                      size="tiny"
+                      :type="telemetryStreaming ? 'success' : 'default'"
+                      secondary
+                      @click="telemetryStreaming = !telemetryStreaming"
+                    >
+                      {{
+                        telemetryStreaming
+                          ? $t('logs.telemetryStreamingOn')
+                          : $t('logs.telemetryStreamingOff')
+                      }}
+                    </NButton>
+                    <NButton size="tiny" secondary @click="autoScroll = !autoScroll">
+                      {{ autoScroll ? $t('logs.autoScroll') : $t('logs.scrollLock') }}
+                    </NButton>
+                  </NFlex>
+                </NFlex>
+              </template>
+
+              <div
+                v-if="logView === 'system'"
+                ref="sysLogRef"
+                style="height: 360px; overflow-y: auto; padding: 10px; font-size: 11px"
+              >
+                <div
+                  v-if="systemLogs.length === 0"
+                  style="color: #666; text-align: center; margin-top: 40px"
+                >
+                  {{ $t('logs.waitingSystemEvents') }}
+                </div>
+                <div
+                  v-for="(log, i) in systemLogs"
+                  :key="i"
+                  style="margin-bottom: 4px; white-space: pre-wrap"
+                >
+                  <span style="color: #888">[{{ localLogTime(log.time) }}]</span>
+                  <span
+                    :style="{
+                      color:
+                        log.level === 'ERROR'
+                          ? '#ff4d4f'
+                          : log.level === 'WARN'
+                            ? '#faad14'
+                            : log.level === 'DEBUG'
+                              ? '#a3a3a3'
+                              : '#69b1ff',
+                      margin: '0 8px',
+                    }"
+                  >
+                    [{{ log.level }}]
+                  </span>
+                  <span style="color: #ddd">{{ log.msg }}</span>
+                </div>
+              </div>
+
+              <div v-else style="height: 360px; overflow-y: auto; padding: 10px; font-size: 11px">
+                <div
+                  v-if="!telemetryStreaming"
+                  style="color: #666; text-align: center; margin-top: 40px"
+                >
+                  {{ $t('logs.telemetryStreamOff') }}
+                </div>
+                <div
+                  v-else-if="telemetryPacketLogs.length === 0"
+                  style="color: #666; text-align: center; margin-top: 40px"
+                >
+                  {{ $t('logs.waitingTelemetryPackets') }}
+                </div>
+                <div
+                  v-for="(log, i) in telemetryPacketLogs"
+                  :key="i"
+                  style="
+                    margin-bottom: 4px;
+                    color: #d4d4d8;
+                    font-weight: 400;
+                    white-space: pre-wrap;
+                  "
+                >
+                  {{ log }}
+                </div>
+              </div>
+            </NCard>
+          </NFlex>
+        </template>
+
+        <!-- extras tab -->
+        <template v-if="tab === 'extras'">
+          <NFlex vertical :size="16">
+            <NCard :title="$t('extras.networkTitle')" size="small" :bordered="false">
+              <NText depth="3" style="font-size: 12px; display: block; margin-bottom: 8px">
+                {{ $t('extras.networkHint') }}
+              </NText>
+              <NFlex vertical :size="10">
+                <NFlex justify="space-between" align="center" :size="8">
+                  <NText>{{ $t('extras.webHost') }}</NText>
+                  <NInput
+                    v-model:value="networkDraftHost"
+                    placeholder="0.0.0.0"
+                    maxlength="15"
+                    :allow-input="allowsNetworkBindHostInput"
+                    size="small"
+                    style="width: 120px; font-family: ui-monospace, monospace"
+                  />
+                </NFlex>
+                <NFlex justify="space-between" align="center" :size="8">
+                  <NText>{{ $t('extras.webPort') }}</NText>
+                  <NInput
+                    v-model:value="networkDraftWebPort"
+                    placeholder="8765"
+                    maxlength="5"
+                    :allow-input="allowsNetworkPortInput"
+                    size="small"
+                    style="width: 120px; font-family: ui-monospace, monospace"
+                  />
+                </NFlex>
+                <NFlex justify="space-between" align="center" :size="8">
+                  <NText>{{ $t('extras.udpPort') }}</NText>
+                  <NInput
+                    v-model:value="networkDraftUdpPort"
+                    placeholder="5555"
+                    maxlength="5"
+                    :allow-input="allowsNetworkPortInput"
+                    size="small"
+                    style="width: 120px; font-family: ui-monospace, monospace"
+                  />
+                </NFlex>
+              </NFlex>
+              <NText depth="3" style="font-size: 11px; display: block; margin-top: 8px">
+                {{ $t('extras.udpPortHint') }}
+              </NText>
+              <UdpHubTargetsField
+                style="margin-top: 12px"
+                :enabled="networkDraftUdpHubEnabled"
+                :tags="networkDraftUdpHubTargetTags"
+                :tag-error="networkUdpHubTagError"
+                :allows-input="allowsNetworkUdpHubTargetInput"
+                :on-create-tag="onNetworkUdpHubTagCreate"
+                :enabled-label="$t('extras.udpHubEnabled')"
+                :targets-label="$t('extras.udpHubTargets')"
+                :placeholder="$t('extras.udpHubTargetsPlaceholder')"
+                :hint="$t('extras.udpHubHint')"
+                @update:enabled="setNetworkUdpHubEnabled"
+                @update:tags="setNetworkUdpHubTargetTags"
+              />
+              <NFlex :size="8" align="center" style="margin-top: 12px">
+                <NButton
+                  type="primary"
+                  size="small"
+                  :disabled="!networkDirty"
+                  @click="saveNetworkAndRestart"
+                >
+                  {{ $t('extras.saveAndRestart') }}
+                </NButton>
+                <NText v-if="networkApplyError" depth="3" style="font-size: 12px; color: #dc2626">
+                  {{ $t(`extras.networkErrors.${networkApplyError}`) }}
+                </NText>
+              </NFlex>
+            </NCard>
+
+            <NCard :title="$t('electronApp.hudTitle')" size="small" :bordered="false">
+              <NText depth="3" style="font-size: 12px; display: block; margin-bottom: 12px">
+                {{ $t('electronApp.hudHint') }}
+              </NText>
+              <NRadioGroup
+                :value="configText('hud_template') || 'classic'"
+                size="small"
+                @update:value="(v: string) => emit('setConfig', 'hud_template', v)"
+              >
+                <NFlex :size="8" wrap>
+                  <NRadioButton
+                    v-for="opt in HUD_TEMPLATES"
+                    :key="opt.value"
+                    :value="opt.value"
+                    :label="$t(`electronApp.${opt.i18nKey}`)"
+                  />
+                </NFlex>
+              </NRadioGroup>
+            </NCard>
+
+            <NCard :title="$t('extras.profileTitle')" size="small" :bordered="false">
+              <NText depth="3" style="font-size: 12px; display: block; margin-bottom: 12px">
+                {{ $t('extras.profileHint') }}
+              </NText>
+              <NFlex :size="8">
+                <NButton @click="emit('exportProfile')">
+                  {{ $t('extras.export') }}
+                </NButton>
+                <NButton @click="emit('openImport')">
+                  {{ $t('extras.import') }}
+                </NButton>
+              </NFlex>
+            </NCard>
+
+            <NCard :title="$t('extras.outputMode')" size="small" :bordered="false">
+              <NText depth="3" style="font-size: 12px; display: block; margin-bottom: 8px">
+                {{ $t('extras.outputModeHint') }}
+              </NText>
+              <NSelect
+                :value="($props.config as any).output_mode || 'keyboard'"
+                :options="
+                  OUTPUT_MODE_OPTIONS.map((o) => ({
+                    label: $t(`extras.${o.i18nKey}`),
+                    value: o.value,
+                  }))
+                "
+                size="small"
+                style="width: 200px"
+                @update:value="emit('setConfig', 'output_mode', $event)"
+              />
+              <template v-if="(($props.config as any).output_mode || 'keyboard') === 'vjoy'">
+                <NText depth="3" style="font-size: 12px; display: block; margin: 12px 0 8px">
+                  {{ $t('extras.vjoyHint') }}
+                </NText>
+                <NFlex vertical :size="12">
+                  <NFlex justify="space-between" align="center" :size="8">
+                    <NText>{{ $t('extras.vjoyDirectShift') }}</NText>
+                    <NSwitch
+                      :value="configBool('vjoy_direct_shift')"
+                      @update:value="emit('setConfig', 'vjoy_direct_shift', $event)"
+                    />
+                  </NFlex>
+                  <NText depth="3" style="font-size: 11px">
+                    {{
+                      configBool('vjoy_direct_shift')
+                        ? $t('extras.vjoyDirectShiftOn')
+                        : $t('extras.vjoyDirectShiftOff')
+                    }}
+                  </NText>
+                  <template v-if="!configBool('vjoy_direct_shift')">
+                    <NFlex
+                      v-for="g in VJOY_SHIFT_BUTTON_FIELDS"
+                      :key="g.key"
+                      justify="space-between"
+                      align="center"
+                      :size="8"
+                    >
+                      <NText>{{ $t(`extras.${g.i18nKey}`) }}</NText>
+                      <NSelect
+                        :value="configText(g.key) || g.placeholder"
+                        :options="
+                          VJOY_BUTTON_OPTIONS.map((o) => ({ label: o.label, value: o.value }))
+                        "
+                        size="small"
+                        style="width: 140px"
+                        @update:value="emit('setConfig', g.key, $event)"
+                      />
+                    </NFlex>
+                  </template>
+                  <NFlex justify="space-between" align="center" :size="8">
+                    <NText>{{ $t('extras.vjoyUseClutch') }}</NText>
+                    <NSwitch
+                      :value="configBool('vjoy_use_clutch')"
+                      @update:value="emit('setConfig', 'vjoy_use_clutch', $event)"
+                    />
+                  </NFlex>
+                  <NFlex
+                    v-if="configBool('vjoy_use_clutch')"
+                    justify="space-between"
+                    align="center"
+                    :size="8"
+                  >
+                    <NText>{{ $t('extras.vjoyClutchKey') }}</NText>
+                    <NSelect
+                      :value="configText('vjoy_clutch_key') || 'B12'"
+                      :options="
+                        VJOY_BUTTON_OPTIONS.map((o) => ({ label: o.label, value: o.value }))
+                      "
+                      size="small"
+                      style="width: 140px"
+                      @update:value="emit('setConfig', 'vjoy_clutch_key', $event)"
+                    />
+                  </NFlex>
+                </NFlex>
+              </template>
+              <NFlex :size="8" align="center" style="margin-top: 10px">
+                <NButton type="warning" size="small" @click="emit('restartBackend')">
+                  {{ $t('extras.saveAndRestart') }}
+                </NButton>
+                <NText depth="3" style="font-size: 11px; color: #d97706">
+                  {{ $t('extras.outputModeRestart') }}
+                </NText>
+              </NFlex>
+            </NCard>
+
+            <NCard
+              v-if="(($props.config as any).output_mode || 'keyboard') === 'keyboard'"
+              :title="$t('extras.shiftKeys')"
+              size="small"
+              :bordered="false"
+            >
+              <NText depth="3" style="font-size: 12px; display: block; margin-bottom: 8px">
+                {{ $t('extras.shiftKeyHint') }}
+              </NText>
+              <NFlex vertical :size="10">
+                <NFlex
+                  v-for="h in SHIFT_KEY_FIELDS"
+                  :key="h.key"
+                  justify="space-between"
+                  align="center"
+                  :size="8"
+                >
+                  <NText>{{ $t(`extras.${h.i18nKey}`) }}</NText>
+                  <NInput
+                    :value="configText(h.key)"
+                    :placeholder="h.placeholder"
+                    size="small"
+                    style="width: 100px; font-family: ui-monospace, monospace"
+                    @update:value="(v) => emit('setConfig', h.key, v.trim().toLowerCase())"
+                  />
+                </NFlex>
+
+                <NFlex justify="space-between" align="center" style="margin-top: 16px">
+                  <NText>{{ $t('extras.clutchAssist') }}</NText>
+                  <NSwitch
+                    :value="configBool('feat_clutch_assist')"
+                    @update:value="emit('setConfig', 'feat_clutch_assist', $event)"
+                  />
+                </NFlex>
+                <template v-if="configBool('feat_clutch_assist')">
+                  <NText depth="3" style="font-size: 11px; display: block; margin: 4px 0 12px">
+                    {{ $t('extras.clutchAssistHint') }}
+                  </NText>
+                  <NFlex
+                    v-for="h in CLUTCH_ASSIST_FIELDS"
+                    :key="h.key"
+                    justify="space-between"
+                    align="center"
+                    :size="8"
+                  >
+                    <NText>{{ $t(`extras.${h.i18nKey}`) }}</NText>
+                    <NInput
+                      :value="configText(h.key)"
+                      :placeholder="h.placeholder"
+                      size="small"
+                      style="width: 100px; font-family: ui-monospace, monospace"
+                      @update:value="(v) => emit('setConfig', h.key, v.trim().toLowerCase())"
+                    />
+                  </NFlex>
+
+                  <NFlex justify="space-between" align="center" style="margin-top: 10px">
+                    <NText>{{ $t('settings.revBlip') }}</NText>
+                    <NSwitch
+                      :value="configBool('feat_rev_blip')"
+                      @update:value="emit('setConfig', 'feat_rev_blip', $event)"
+                    />
+                  </NFlex>
+                  <NText depth="3" style="font-size: 11px; display: block; margin: 2px 0 8px">
+                    {{ $t('settings.hints.revBlip') }}
+                  </NText>
+
+                  <NFlex justify="space-between" align="center" style="margin-bottom: 4px">
+                    <NText>{{ $t('extras.blipMs') }}</NText>
+                    <NText code style="font-family: ui-monospace, monospace">
+                      {{ configValue('blip_ms') }}ms
+                    </NText>
+                  </NFlex>
+                  <NSlider
+                    :value="configValue('blip_ms')"
+                    :min="20"
+                    :max="150"
+                    :step="5"
+                    style="margin-bottom: 4px"
+                    @update:value="(v) => emit('setConfig', 'blip_ms', v)"
+                  />
+                  <NFlex vertical :size="14" style="margin-top: 12px">
+                    <div v-for="s in CLUTCH_TIMING_SLIDERS" :key="s.key">
+                      <NFlex justify="space-between" align="center" style="margin-bottom: 4px">
+                        <NText>{{ $t(`extras.${s.i18nKey}`) }}</NText>
+                        <NText code style="font-family: ui-monospace, monospace">
+                          {{ configValue(s.key) }}ms
+                        </NText>
+                      </NFlex>
+                      <NSlider
+                        :value="configValue(s.key)"
+                        :min="s.min"
+                        :max="s.max"
+                        :step="s.step ?? 1"
+                        @update:value="(v) => emit('setConfig', s.key, v)"
+                      />
+                    </div>
+                  </NFlex>
+                </template>
+              </NFlex>
+            </NCard>
+
+            <NCard :title="$t('extras.hotkeys')" size="small" :bordered="false">
+              <NText depth="3" style="font-size: 12px; display: block; margin-bottom: 8px">
+                {{ $t('extras.hotkeyHint') }}
+              </NText>
+              <NFlex vertical :size="10">
+                <NFlex
+                  v-for="h in HOTKEY_FIELDS"
+                  :key="h.key"
+                  justify="space-between"
+                  align="center"
+                  :size="8"
+                >
+                  <NText>{{ $t(`extras.${h.i18nKey}`) }}</NText>
+                  <NInput
+                    :value="configText(h.key)"
+                    :placeholder="h.placeholder"
+                    size="small"
+                    style="width: 100px; font-family: ui-monospace, monospace"
+                    @update:value="(v) => emit('setConfig', h.key, v.trim().toLowerCase())"
+                  />
+                </NFlex>
+              </NFlex>
+            </NCard>
+
+            <NCard :title="$t('extras.fullTuning')" size="small" :bordered="false">
+              <NFlex vertical :size="14">
+                <div v-for="s in extrasSliders" :key="s.key">
+                  <NFlex justify="space-between" align="center" style="margin-bottom: 4px">
+                    <NText>{{ $t(`settings.${s.i18nKey}`) }}</NText>
+                    <NText code style="font-family: ui-monospace, monospace">
+                      {{ configValue(s.key) }}{{ sliderUnit(s) }}
+                    </NText>
+                  </NFlex>
+                  <NSlider
+                    :value="configValue(s.key)"
+                    :min="s.min"
+                    :max="s.max"
+                    :step="s.step ?? 1"
+                    @update:value="(v) => emit('setConfig', s.key, v)"
+                  />
+                </div>
+              </NFlex>
+            </NCard>
+          </NFlex>
+        </template>
+      </NTabPane>
+    </NTabs>
+  </div>
+</template>

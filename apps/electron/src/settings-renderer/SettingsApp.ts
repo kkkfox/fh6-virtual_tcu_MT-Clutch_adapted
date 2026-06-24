@@ -1,0 +1,296 @@
+import type { SliderDef } from '@virtual-tcu/shared/config/settings'
+import type { AppLocale } from '@virtual-tcu/shared/i18n'
+import { useNetworkSettings } from '@virtual-tcu/shared/composables/useNetworkSettings'
+import { useTcuStore } from '@virtual-tcu/shared/composables/useTcuStore'
+import { DRIVE_MODES } from '@virtual-tcu/shared/config/modes'
+import {
+  FEATURE_TOGGLES,
+  HOTKEY_FIELDS,
+  LOG_OUTPUT_FORMAT_OPTIONS,
+  OUTPUT_MODE_OPTIONS,
+  SETTING_SLIDERS,
+  SHIFT_KEY_FIELDS,
+} from '@virtual-tcu/shared/config/settings'
+import { setAppLocale } from '@virtual-tcu/shared/i18n'
+import { formatDuration, sliderUnit } from '@virtual-tcu/shared/utils/format'
+import { computed, onMounted, ref, watch } from 'vue'
+import { useI18n } from 'vue-i18n'
+// Replace `./assets/brand-icon.svg` with your PNG/SVG and update the import path if needed.
+import brandIconUrl from './assets/brand-icon.png'
+
+import { GITHUB_REPO_URL } from './github'
+import { useUpdateAvailableModal } from './UpdateAvailableModal'
+import { useUpdater } from './useUpdater'
+
+export { brandIconUrl, GITHUB_REPO_URL }
+
+export type SettingsTabKey =
+  | 'overview'
+  | 'config'
+  | 'advanced'
+  | 'stats'
+  | 'history'
+  | 'logs'
+  | 'about'
+
+export function useSettingsApp() {
+  const { t, locale } = useI18n()
+  const activeTab = ref<SettingsTabKey>('overview')
+  const store = useTcuStore()
+
+  const tabs: { key: SettingsTabKey; i18nKey: string }[] = [
+    { key: 'overview', i18nKey: 'overview' },
+    { key: 'config', i18nKey: 'config' },
+    { key: 'advanced', i18nKey: 'advanced' },
+    { key: 'stats', i18nKey: 'stats' },
+    { key: 'history', i18nKey: 'history' },
+    { key: 'logs', i18nKey: 'logs' },
+    { key: 'about', i18nKey: 'about' },
+  ]
+
+  const localeOptions = [
+    { label: 'English', value: 'en' },
+    { label: '简体中文', value: 'zh-CN' },
+  ]
+
+  const driveModes = DRIVE_MODES
+  const featureToggles = FEATURE_TOGGLES
+  const hotkeyFields = HOTKEY_FIELDS
+  const shiftKeyFields = SHIFT_KEY_FIELDS
+  const outputModeOptions = OUTPUT_MODE_OPTIONS
+  const logOutputFormatOptions = LOG_OUTPUT_FORMAT_OPTIONS
+
+  const restartBackend = () => {
+    const api = (window as unknown as { tcu?: { restartBackend?: () => Promise<void> } }).tcu
+    api?.restartBackend?.()
+  }
+  const network = useNetworkSettings(() => store.config)
+
+  const settingsSliders = computed<SliderDef[]>(() =>
+    SETTING_SLIDERS.filter((s) => (s.panel ?? 'settings') === 'settings'),
+  )
+  const advancedSliders = computed<SliderDef[]>(() =>
+    SETTING_SLIDERS.filter((s) => s.panel === 'extras'),
+  )
+
+  const statusLabel = computed(() => {
+    if (!store.connected.value)
+      return { text: t('connection.disconnected'), kind: 'error' as const }
+    if (store.live.value) return { text: t('connection.live'), kind: 'success' as const }
+    return { text: t('connection.standby'), kind: 'warning' as const }
+  })
+
+  const statsRows = computed(() => {
+    const s = store.sessionStats.value
+    const tel = store.telemetry.value
+    if (!s) return null
+    return {
+      duration: formatDuration(s.duration_s || 0),
+      total: s.upshifts + s.downshifts,
+      upshifts: s.upshifts,
+      downshifts: s.downshifts,
+      kickdowns: s.kickdowns,
+      brakeDowns: s.brake_downs,
+      predictives: s.predictives,
+      launches: s.launches,
+      peakRpm: Math.round(s.peak_rpm),
+      peakSpeed: Math.round(s.peak_speed),
+      peakGLat: s.peak_g_lat.toFixed(2),
+      peakGLon: s.peak_g_lon.toFixed(2),
+      peakPower: Math.round(s.peak_power_kw),
+      avgThr: Math.round(s.avg_throttle),
+      cars: s.cars_driven,
+      calib: tel?.calibrated,
+      powerLearned: tel?.power_curve_learned,
+    }
+  })
+
+  const historyItems = computed(() => [...store.shiftHistory.value].reverse())
+
+  const dashboardUrl = computed(() => store.webUrls.value?.local ?? 'http://127.0.0.1:8765')
+  const lanUrl = computed(() => store.webUrls.value?.lan ?? null)
+  const udpPort = computed(() =>
+    Number(store.config.udp_port ?? store.webUrls.value?.udp_port ?? 5555),
+  )
+
+  function configNumber(key: string): number {
+    const v = store.config[key]
+    if (typeof v === 'number') return v
+    if (typeof v === 'boolean') return v ? 1 : 0
+    return Number(v) || 0
+  }
+  function configBool(key: string): boolean {
+    return !!store.config[key]
+  }
+  function configText(key: string): string {
+    return String(store.config[key] ?? '')
+  }
+
+  const networkApplying = ref(false)
+  let applyTimeoutHandle: ReturnType<typeof setTimeout> | null = null
+
+  function clearApplyTimeout() {
+    if (applyTimeoutHandle !== null) {
+      clearTimeout(applyTimeoutHandle)
+      applyTimeoutHandle = null
+    }
+  }
+
+  function applyNetworkSettings() {
+    const parsed = network.validate()
+    if (!parsed) return
+    networkApplying.value = true
+    network.applyOk.value = false
+    network.applyError.value = ''
+    store.saveNetworkAndRestart(
+      parsed.host,
+      parsed.webPort,
+      parsed.udpPort,
+      parsed.udpHubEnabled,
+      parsed.udpHubTargets,
+    )
+    // Failsafe: if backend never responds (e.g. WS dropped without reconnect),
+    // surface a generic failure after 6s so the button doesn't spin forever.
+    clearApplyTimeout()
+    applyTimeoutHandle = setTimeout(() => {
+      if (networkApplying.value) {
+        networkApplying.value = false
+        network.markApplyResult(false, 'bindFailed')
+      }
+    }, 6000)
+  }
+
+  function setLocale(value: AppLocale) {
+    locale.value = value
+    setAppLocale(value)
+    void window.tcu?.setLocale(value)
+  }
+
+  function onLogStart(mode: 'events' | 'all') {
+    const format = String(store.config.log_output_format ?? 'bin.gz')
+    store.logStart(mode, format)
+  }
+
+  function onLogStop(saveAs: 'file' | 'fusion_snapshot' = 'file') {
+    store.logStop(saveAs)
+  }
+
+  function onTriggerFusionSnapshot() {
+    store.triggerFusionSnapshot('manual_dump')
+  }
+
+  function onExportProfile() {
+    store.send({ type: 'export_profile' })
+  }
+
+  function onOpenImport() {
+    store.openModal('import', t('modal.importTitle'), '')
+  }
+
+  function openDashboard() {
+    window.tcu?.openDashboard()
+  }
+
+  function toggleHud() {
+    window.tcu?.toggleHud()
+  }
+
+  function openGithub() {
+    void window.tcu?.openExternal(GITHUB_REPO_URL)
+  }
+
+  watch(
+    () => store.webBindStatus.value,
+    (status) => {
+      if (!status) return
+      clearApplyTimeout()
+      networkApplying.value = false
+      // The store handler already updated config / webUrls / WS URL from the
+      // network_changed payload, so markApplyResult() is enough to refresh the
+      // drafts and surface the green "applied" badge. Do NOT window.reload()
+      // here: the cached backendEndpoints in the main process may still point
+      // at the previous bind, and a fresh load would race the WS reconnect and
+      // briefly render `config = {}` (which then falls back to the hard-coded
+      // defaults in syncFromConfig() — that's where the "everything reset to
+      // default" report came from).
+      if (status.ok) network.markApplyResult(true)
+      else network.markApplyResult(false, status.error ?? 'bindFailed')
+      store.webBindStatus.value = null
+    },
+  )
+
+  watch(
+    () => store.connected.value,
+    (connected, wasConnected) => {
+      if (connected && !wasConnected) network.syncFromConfig()
+    },
+  )
+
+  const updater = useUpdater()
+  const updateModal = useUpdateAvailableModal({
+    show: updater.showUpdateModal,
+    state: updater.state,
+    pendingVersion: updater.pendingVersion,
+    pendingReleaseNotes: updater.pendingReleaseNotes,
+  })
+
+  onMounted(() => {
+    void window.tcu?.setLocale(locale.value as AppLocale)
+  })
+
+  return {
+    t,
+    locale,
+    activeTab,
+    tabs,
+    localeOptions,
+    driveModes,
+    featureToggles,
+    hotkeyFields,
+    shiftKeyFields,
+    outputModeOptions,
+    logOutputFormatOptions,
+    networkDraftHost: network.draftHost,
+    networkDraftWebPort: network.draftWebPort,
+    networkDraftUdpPort: network.draftUdpPort,
+    networkDraftUdpHubEnabled: network.draftUdpHubEnabled,
+    networkDraftUdpHubTargetTags: network.draftUdpHubTargetTags,
+    networkUdpHubTagError: network.udpHubTagError,
+    networkDirty: network.dirty,
+    networkApplyError: network.applyError,
+    networkApplyOk: network.applyOk,
+    networkApplying,
+    allowsNetworkBindHostInput: network.allowsBindHostInput,
+    allowsNetworkPortInput: network.allowsPortInput,
+    allowsNetworkUdpHubTargetInput: network.allowsUdpHubTargetInput,
+    setNetworkUdpHubEnabled: network.setUdpHubEnabled,
+    setNetworkUdpHubTargetTags: network.setUdpHubTargetTags,
+    onNetworkUdpHubTagCreate: network.onCreateUdpHubTag,
+    applyNetworkSettings,
+    settingsSliders,
+    advancedSliders,
+    statusLabel,
+    statsRows,
+    historyItems,
+    dashboardUrl,
+    lanUrl,
+    udpPort,
+    sliderUnit,
+    configNumber,
+    configBool,
+    configText,
+    setLocale,
+    onLogStart,
+    onLogStop,
+    onTriggerFusionSnapshot,
+    onExportProfile,
+    onOpenImport,
+    openDashboard,
+    restartBackend,
+    toggleHud,
+    openGithub,
+    updater,
+    updateModal,
+    store,
+  }
+}

@@ -1,0 +1,340 @@
+from virtual_tcu.config.constants import Cfg
+from virtual_tcu.telemetry.model import Telemetry
+
+
+class _ParabolaFit:
+    """Incremental least-squares fit of torque = a*r^2 + b*r + c, where r
+    is rpm fraction (0..1). Accumulators decay slowly so the model adapts
+    if the car setup changes. O(1) memory — only sums are kept."""
+
+    DECAY = 0.9997
+
+    def __init__(self):
+        self.n = self.sx = self.sx2 = self.sx3 = self.sx4 = 0.0
+        self.sy = self.sxy = self.sx2y = 0.0
+        self._abc = None
+
+    def add(self, x: float, y: float, weight: float = 1.0):
+        d = self.DECAY
+        self.n = self.n * d + weight
+        self.sx = self.sx * d + weight * x
+        self.sx2 = self.sx2 * d + weight * x * x
+        self.sx3 = self.sx3 * d + weight * x**3
+        self.sx4 = self.sx4 * d + weight * x**4
+        self.sy = self.sy * d + weight * y
+        self.sxy = self.sxy * d + weight * x * y
+        self.sx2y = self.sx2y * d + weight * x * x * y
+        self._abc = None
+
+    def solve(self):
+        """Return (a, b, c) of the fitted parabola, or None if ill-posed."""
+        if self._abc is not None:
+            return self._abc
+        if self.n < 4:
+            return None
+        m = [
+            [self.sx4, self.sx3, self.sx2],
+            [self.sx3, self.sx2, self.sx],
+            [self.sx2, self.sx, self.n],
+        ]
+        rhs = [self.sx2y, self.sxy, self.sy]
+
+        def det3(mat):
+            return (
+                mat[0][0] * (mat[1][1] * mat[2][2] - mat[1][2] * mat[2][1])
+                - mat[0][1] * (mat[1][0] * mat[2][2] - mat[1][2] * mat[2][0])
+                + mat[0][2] * (mat[1][0] * mat[2][1] - mat[1][1] * mat[2][0])
+            )
+
+        det = det3(m)
+        if abs(det) < 1e-9:
+            return None
+
+        def swap(mat, col, vec):
+            return [[vec[r] if c == col else mat[r][c] for c in range(3)] for r in range(3)]
+
+        a = det3(swap(m, 0, rhs)) / det
+        b = det3(swap(m, 1, rhs)) / det
+        c = det3(swap(m, 2, rhs)) / det
+        self._abc = (a, b, c)
+        return self._abc
+
+    def to_dict(self) -> dict:
+        """Serialise accumulator state so the fit can be restored later."""
+        return {
+            "n": self.n,
+            "sx": self.sx,
+            "sx2": self.sx2,
+            "sx3": self.sx3,
+            "sx4": self.sx4,
+            "sy": self.sy,
+            "sxy": self.sxy,
+            "sx2y": self.sx2y,
+        }
+
+    @classmethod
+    def from_dict(cls, d: dict) -> "_ParabolaFit":
+        """Restore a fit from a previously-saved to_dict() snapshot."""
+        fit = cls()
+        for attr in ("n", "sx", "sx2", "sx3", "sx4", "sy", "sxy", "sx2y"):
+            if attr in d:
+                setattr(fit, attr, float(d[attr]))
+        return fit
+
+    @property
+    def x_spread(self) -> float:
+        if self.n < 2:
+            return 0.0
+        mean = self.sx / self.n
+        var = self.sx2 / self.n - mean * mean
+        return var**0.5 if var > 0 else 0.0
+
+
+class PowerCurveDetector:
+    """Per-car engine model. Fits a parabola to (rpm, torque) samples and
+    derives peak torque and peak power analytically from the curve.
+
+    Unlike a bucket histogram, this gives a usable estimate from very few
+    samples (the curve shape extrapolates the peak) and converges smoothly
+    as more data arrives — no binary learning/learned threshold."""
+
+    MIN_SAMPLES = 8
+    FULL_CONF_SAMPLES = 80
+    MIN_SPREAD = 0.06
+    GOOD_SPREAD = 0.16
+    # Spread sub-score now measures the rpm RANGE actually sampled, not the
+    # std-dev of the sample pile. A very fast car cruising at top speed dumps
+    # thousands of samples at one near-constant rpm, which collapses the std-dev
+    # (x_spread) and wrongly reads as "narrow data" even though acceleration
+    # swept the whole rev range — leaving the curve stuck below the confidence
+    # floor (so it never reads as learned and the crossover stays disabled).
+    # Range coverage is immune to that sample-count imbalance: a launch-to-
+    # limiter pull covers ~0.6-0.7 here regardless of how long it then cruises.
+    MIN_COVERAGE = 0.12
+    GOOD_COVERAGE = 0.40
+    # Upshift timing needs samples near the real redline; mid-range-only fits
+    # extrapolate a peak too early (common on RWD before a limiter pull).
+    HIGH_RPM_COVERAGE = 0.78
+    STATIONARY_LEARN_SPEED_KMH = 8.0
+
+    def __init__(self):
+        self._fits: dict[tuple, _ParabolaFit] = {}
+        self._max_r: dict[tuple, float] = {}
+        self._min_r: dict[tuple, float] = {}
+
+    def _gear_ok(self, td: Telemetry) -> bool:
+        if td.gear >= 2:
+            return True
+        # Brake+throttle revving in 1st is the fastest way to learn limiter/curve.
+        return td.gear == 1 and td.speed_kmh < self.STATIONARY_LEARN_SPEED_KMH
+
+    def observe(self, td: Telemetry):
+        ck = td.car_key
+        if ck[0] <= 0 or not self._gear_ok(td):
+            return
+        if td.throttle < 0.45 or td.torque_nm <= 0 or td.is_shifting:
+            return
+        r = td.rpm_pct
+        if r < 0.20 or r > 1.0:
+            return
+        prev_max = self._max_r.get(ck, 0.0)
+        if r > prev_max:
+            self._max_r[ck] = r
+        # Low end of the sampled range, over genuine pulls only (so part-throttle
+        # coasting doesn't anchor a spuriously low floor). Together with _max_r
+        # this is the rpm coverage the spread sub-score uses.
+        if td.throttle >= 0.70:
+            prev_min = self._min_r.get(ck)
+            if prev_min is None or r < prev_min:
+                self._min_r[ck] = r
+        # Partial throttle and some slip still carry curve-shape info but
+        # weigh less — the least-squares fit absorbs them as soft evidence.
+        weight = 1.0
+        if td.throttle < 0.70:
+            weight *= 0.5
+        if td.rear_slip > 0.5:
+            weight *= 0.4
+        if r >= self.HIGH_RPM_COVERAGE and td.throttle >= 0.85:
+            weight *= 1.6
+        self._fits.setdefault(ck, _ParabolaFit()).add(r, td.torque_nm, weight)
+
+    def _peaks(self, car_key: tuple):
+        """Return (peak_torque_rpm, peak_power_rpm, confidence)."""
+        fit = self._fits.get(car_key)
+        if fit is None or fit.n < self.MIN_SAMPLES:
+            return None, None, 0.0
+        abc = fit.solve()
+        if abc is None:
+            return None, None, 0.0
+        a, b, c = abc
+        if a >= -1e-6:  # not concave-down → no torque peak in range yet
+            return None, None, 0.0
+
+        pt = max(0.40, min(0.98, -b / (2 * a)))
+
+        # Peak power: maximize torque*rpm = a r^3 + b r^2 + c r.
+        # dP/dr = 3a r^2 + 2b r + c.
+        deriv_at_redline = 3 * a + 2 * b + c
+        if deriv_at_redline > 0:
+            # Power still climbing at the limiter — high-rev NA engines
+            # (e.g. BMW S54). The "peak" is effectively the redline:
+            # shift as late as possible.
+            pp = 0.99
+        else:
+            disc = 4 * b * b - 12 * a * c
+            if disc < 0:
+                pp = min(pt + 0.10, 0.95)
+            else:
+                sq = disc**0.5
+                roots = [(-2 * b + sq) / (6 * a), (-2 * b - sq) / (6 * a)]
+                cands = [r for r in roots if pt - 0.02 <= r <= 1.0]
+                pp = max(cands) if cands else min(pt + 0.10, 0.95)
+        pp = max(pt, min(0.99, pp))
+
+        n_conf = max(
+            0.0, min(1.0, (fit.n - self.MIN_SAMPLES) / (self.FULL_CONF_SAMPLES - self.MIN_SAMPLES))
+        )
+        max_r = self._max_r.get(car_key, 0.0)
+        min_r = self._min_r.get(car_key, max_r)
+        coverage = max(0.0, max_r - min_r)
+        s_conf = max(
+            0.0, min(1.0, (coverage - self.MIN_COVERAGE) / (self.GOOD_COVERAGE - self.MIN_COVERAGE))
+        )
+        span = self.HIGH_RPM_COVERAGE - 0.40
+        high_conf = max(0.0, min(1.0, (max_r - 0.40) / span)) if span > 0 else 0.0
+        conf = n_conf * s_conf * high_conf
+        # Mid-range-only parabolas often place the peak far below the real
+        # power band — ignore until we have high-RPM evidence.
+        if max_r < self.HIGH_RPM_COVERAGE and pp < 0.82:
+            return None, None, 0.0
+        return pt, pp, conf
+
+    def peak_torque_rpm(self, car_key: tuple) -> float | None:
+        return self._peaks(car_key)[0]
+
+    def peak_power_rpm(self, car_key: tuple) -> float | None:
+        return self._peaks(car_key)[1]
+
+    def confidence(self, car_key: tuple) -> float:
+        return self._peaks(car_key)[2]
+
+    def optimal_upshift_rpm(
+        self, td: Telemetry, fallback: float = 0.85, offset: float = 0.03
+    ) -> float:
+        pt, pp, conf = self._peaks(td.car_key)
+        if pp is None:
+            return fallback
+        model = max(0.65, min(0.99, pp + offset))
+        # Blend: early low-confidence estimates lean on the fallback,
+        # mature ones trust the model fully. Never upshift earlier than the
+        # configured fallback while high-RPM coverage is still missing.
+        blended = conf * model + (1.0 - conf) * fallback
+        max_r = self._max_r.get(td.car_key, 0.0)
+        if max_r < self.HIGH_RPM_COVERAGE:
+            return max(blended, fallback)
+        return blended
+
+    def _torque_model(self, car_key: tuple):
+        """Return a callable ``r -> torque`` (rpm fraction 0..1, torque in the
+        same relative units the parabola was fitted on), or None when the fit
+        is missing, too cold, or not concave-down. The absolute scale cancels
+        in the crossover ratio, so only the *shape* needs to be right."""
+        fit = self._fits.get(car_key)
+        if fit is None or fit.n < self.MIN_SAMPLES:
+            return None
+        abc = fit.solve()
+        if abc is None:
+            return None
+        a, b, c = abc
+        if a >= -1e-6:  # not concave-down yet → no usable curve shape
+            return None
+
+        def torque(r: float) -> float:
+            r = max(0.0, min(1.0, r))
+            return a * r * r + b * r + c
+
+        return torque
+
+    def crossover_upshift_ok(
+        self,
+        td: Telemetry,
+        ratios: dict[int, float],
+        *,
+        conf_floor: float = 0.30,
+        hysteresis: float = 0.02,
+    ) -> bool | None:
+        """Tractive-force crossover test for an N -> N+1 upshift.
+
+        The max-acceleration shift point is where the wheel force the *next*
+        gear would make — at the rpm the engine drops to after the shift —
+        meets or beats the force the current gear is making now. Wheel force
+        is ``engine_torque * overall_reduction``; the learned rpm/kmh ratio is
+        proportional to that reduction, so ``F ~= torque(r) * ratio`` (the
+        unknown constants cancel in the comparison).
+
+        Returns True (shift now), False (hold) or **None** when the inputs are
+        too cold to decide — an unknown next-gear ratio (e.g. a brand-new car
+        that has never been in N+1) or a curve below ``conf_floor``. The caller
+        must fall back to the rpm-percent path on None; that fallback is what
+        lets an unlearned car still upshift out of 1st at all.
+        """
+        g = td.gear
+        r_cur = ratios.get(g)
+        r_up = ratios.get(g + 1)
+        if not r_cur or not r_up or r_up <= 0.0 or r_up >= r_cur:
+            return None
+        if self.confidence(td.car_key) < conf_floor:
+            return None
+        # Maturity gate: the parabola is only trustworthy near the limiter once
+        # the engine has actually been sampled there. Until then a mid-range-
+        # dominated fit fabricates a high-rpm roll-off and the crossover fires
+        # early — so defer to the rpm-percent path (which the caller drives up
+        # to CROSSOVER_MATURE_MAX_R) to harvest the missing top-end samples.
+        if not self.is_crossover_mature(td.car_key):
+            return None
+        torque = self._torque_model(td.car_key)
+        if torque is None:
+            return None
+
+        r_now = td.rpm_pct
+        r_next = r_now * (r_up / r_cur)  # speed fixed → rpm scales with ratio
+        f_now = torque(r_now) * r_cur
+        f_next = torque(r_next) * r_up
+        if f_now <= 0.0:
+            return None
+        return f_next >= f_now * (1.0 + hysteresis)
+
+    def has_data(self, car_key: tuple) -> bool:
+        return self._peaks(car_key)[1] is not None
+
+    def is_crossover_mature(self, car_key: tuple) -> bool:
+        """True once the engine has been revved close enough to the limiter on
+        this car that the high-rpm end of the torque parabola is backed by real
+        samples. Below this the crossover test is disabled (see
+        crossover_upshift_ok) and the caller holds the upshift toward
+        ``Cfg.CROSSOVER_MATURE_MAX_R`` to collect the missing top-end data."""
+        return self._max_r.get(car_key, 0.0) >= Cfg.CROSSOVER_MATURE_MAX_R
+
+    def dump(self, car_key: tuple) -> dict | None:
+        """Serialise the parabola fit for *car_key*, or None if no data."""
+        fit = self._fits.get(car_key)
+        if fit is None:
+            return None
+        data = fit.to_dict()
+        max_r = self._max_r.get(car_key)
+        if max_r is not None:
+            data["max_r"] = max_r
+        min_r = self._min_r.get(car_key)
+        if min_r is not None:
+            data["min_r"] = min_r
+        return data
+
+    def load(self, car_key: tuple, data: dict):
+        """Restore a parabola fit from a previously-saved dump."""
+        if not isinstance(data, dict):
+            return
+        self._fits[car_key] = _ParabolaFit.from_dict(data)
+        if "max_r" in data:
+            self._max_r[car_key] = float(data["max_r"])
+        if "min_r" in data:
+            self._min_r[car_key] = float(data["min_r"])

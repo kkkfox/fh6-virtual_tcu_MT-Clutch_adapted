@@ -1,0 +1,53 @@
+appId: com.virtualtcu.app
+productName: VirtualTCU
+copyright: Copyright (c) 2026 Virtual TCU
+
+# Run electron-builder from the monorepo root so it sees the hoisted
+# node_modules that pnpm creates.  The root package.json includes
+# the electron entry point and all production dependencies.
+directories:
+  output: apps/electron/release
+  buildResources: apps/electron/build
+
+files:
+  - apps/electron/out/**/*
+  - apps/electron/package.json
+
+# Bundle the PyInstaller onedir output as extraResources/backend/
+extraResources:
+  - from: dist/VirtualTCU
+    to: backend
+    filter:
+      - '**/*'
+  - from: apps/electron/build/icon.ico
+    to: icon.ico
+
+asar: true
+asarUnpack: []
+
+win:
+  target:
+    - target: nsis
+      arch: x64
+    - target: zip
+      arch: x64
+  artifactName: ${productName}-${version}-win64.${ext}
+  requestedExecutionLevel: highestAvailable
+  icon: apps/electron/build/icon.ico
+
+nsis:
+  oneClick: false
+  perMachine: false
+  allowToChangeInstallationDirectory: true
+  allowElevation: true
+  deleteAppDataOnUninstall: false
+  createDesktopShortcut: true
+  createStartMenuShortcut: true
+  shortcutName: VirtualTCU
+  include: apps/electron/build/installer.nsh
+
+publish:
+  - provider: github
+    owner: kkkfox
+    repo: fh6-virtual_tcu_MT-Clutch_adapted
+    releaseType: release

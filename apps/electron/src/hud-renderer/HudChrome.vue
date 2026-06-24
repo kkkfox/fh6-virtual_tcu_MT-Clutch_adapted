@@ -1,0 +1,322 @@
+<script setup lang="ts">
+  import { computed } from 'vue'
+  import { useI18n } from 'vue-i18n'
+  import { hudModeI18nKey } from './hud-mode-label'
+
+  const props = withDefaults(
+    defineProps<{
+      mode: string
+      modeColor: string
+      tcuState: string
+      clickThrough: boolean
+      compact?: boolean
+      footer?: boolean
+      learnState?: string
+      learnMatureGears?: number
+      learnTargetGears?: number
+      relearnStatus?: string
+      relearnStatusRpm?: number
+      clutchAssistEnabled?: boolean
+      transmissionType?: 'sequential' | 'clutch' | 'unknown'
+    }>(),
+    { compact: false, footer: false, learnState: 'learning', clutchAssistEnabled: false, transmissionType: 'unknown' },
+  )
+
+  const emit = defineEmits<{
+    toggleClickThrough: [e: MouseEvent]
+    close: []
+  }>()
+
+  const { t } = useI18n()
+  const modeLabel = computed(() => t(hudModeI18nKey(props.mode)))
+
+  const learnLabel = computed(() => {
+    if (props.learnState === 'relearning') return t('calibration.crossoverRelearning')
+    if (props.learnState === 'learned') return t('calibration.crossoverLearned')
+    const total = Number(props.learnTargetGears ?? 0)
+    const done = Number(props.learnMatureGears ?? 0)
+    return total > 0
+      ? t('calibration.crossoverProgress', { done, total })
+      : t('calibration.crossoverLearning')
+  })
+
+  const relearnLabel = computed(() => {
+    const s = props.relearnStatus
+    if (!s) return ''
+    if (s === 'learned') {
+      return t('calibration.relearnLearned', {
+        rpm: Math.round(Number(props.relearnStatusRpm ?? 0)),
+      })
+    }
+    if (s === 'aborted_moved') return t('calibration.relearnAbortedMoved')
+    if (s === 'timeout') return t('calibration.relearnTimeout')
+    return t('calibration.relearnSkipped')
+  })
+
+  const pillLabel = computed(() => relearnLabel.value || learnLabel.value)
+  const pillClass = computed(() => {
+    const s = props.relearnStatus
+    if (s) return s === 'learned' ? 'learned' : 'relearning'
+    return props.learnState
+  })
+
+  const transLabel = computed(() => {
+    if (props.transmissionType === 'sequential') return 'SEQ'
+    if (props.transmissionType === 'clutch') return 'CLT'
+    return '—'
+  })
+  const transClass = computed(() => {
+    if (props.transmissionType === 'sequential') return 'trans-sequential'
+    if (props.transmissionType === 'clutch') return 'trans-clutch'
+    return 'trans-unknown'
+  })
+</script>
+
+<template>
+  <div class="hud-chrome" :class="{ compact, footer, interactive: clickThrough }">
+    <div class="meta">
+      <span
+        class="mode-dot"
+        :style="{ background: modeColor, boxShadow: `0 0 10px ${modeColor}88` }"
+      />
+      <span class="mode-name" :style="{ color: modeColor }">{{ modeLabel }}</span>
+      <template v-if="!compact">
+        <span class="sep" aria-hidden="true">·</span>
+        <span class="state-name" :class="{ shifting: tcuState === 'SHIFTING' }">{{
+          tcuState
+        }}</span>
+      </template>
+    </div>
+
+    <span class="learn-pill" :class="pillClass" :title="t('calibration.crossover')">{{
+      pillLabel
+    }}</span>
+
+    <span v-if="clutchAssistEnabled" class="trans-pill" :class="transClass" :title="t('calibration.transmission')">
+      {{ transLabel }}
+    </span>
+
+    <span class="clutch-pill" :class="{ on: clutchAssistEnabled }">
+      CLUTCH {{ clutchAssistEnabled ? 'ON' : 'OFF' }}
+    </span>
+
+    <div class="actions interactive">
+      <button
+        type="button"
+        class="btn"
+        :class="{ active: clickThrough }"
+        :title="clickThrough ? t('electronApp.hudUnlock') : t('electronApp.hudLock')"
+        @click="emit('toggleClickThrough', $event)"
+      >
+        <svg
+          width="13"
+          height="13"
+          viewBox="0 0 24 24"
+          fill="none"
+          stroke="currentColor"
+          stroke-width="2"
+        >
+          <path d="M8 6h13M8 12h13M8 18h13M3 6h.01M3 12h.01M3 18h.01" stroke-linecap="round" />
+        </svg>
+      </button>
+      <button type="button" class="btn" :title="t('electronApp.hudClose')" @click="emit('close')">
+        <svg
+          width="13"
+          height="13"
+          viewBox="0 0 24 24"
+          fill="none"
+          stroke="currentColor"
+          stroke-width="2"
+        >
+          <path d="M18 6L6 18M6 6l12 12" stroke-linecap="round" />
+        </svg>
+      </button>
+    </div>
+  </div>
+</template>
+
+<style scoped>
+  .hud-chrome {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    min-height: 22px;
+    box-sizing: border-box;
+    font-size: 9px;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    color: var(--hud-chrome-fg, #94a3b8);
+  }
+
+  .hud-chrome:not(.footer) {
+    width: 100%;
+  }
+
+  .hud-chrome.compact:not(.footer) {
+    min-height: 20px;
+    margin-bottom: 4px;
+  }
+
+  .hud-chrome.footer {
+    width: 100%;
+    min-height: 28px;
+    padding: 0;
+  }
+
+  .meta {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    min-width: 0;
+    flex: 1;
+  }
+
+  .mode-dot {
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    flex-shrink: 0;
+  }
+
+  .mode-name {
+    font-weight: 800;
+    font-size: 10px;
+    color: var(--hud-chrome-mode-fg, #e2e8f0);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    max-width: 140px;
+  }
+
+  .sep {
+    opacity: 0.45;
+  }
+
+  .state-name {
+    color: var(--hud-chrome-state-fg, #64748b);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  .state-name.shifting {
+    color: #c4b5fd;
+  }
+
+  .learn-pill {
+    flex-shrink: 0;
+    font-size: 9px;
+    font-weight: 600;
+    letter-spacing: 0.04em;
+    line-height: 1;
+    padding: 2px 7px;
+    border-radius: 5px;
+    border: 1px solid transparent;
+    white-space: nowrap;
+  }
+
+  .learn-pill.learning {
+    color: #fbbf24;
+    background: rgba(245, 158, 11, 0.14);
+    border-color: rgba(245, 158, 11, 0.4);
+  }
+
+  .learn-pill.learned {
+    color: #4ade80;
+    background: rgba(34, 197, 94, 0.14);
+    border-color: rgba(34, 197, 94, 0.4);
+  }
+
+  .learn-pill.relearning {
+    color: #60a5fa;
+    background: rgba(59, 130, 246, 0.18);
+    border-color: rgba(59, 130, 246, 0.5);
+  }
+
+  .trans-pill {
+    flex-shrink: 0;
+    font-size: 9px;
+    font-weight: 600;
+    letter-spacing: 0.04em;
+    line-height: 1;
+    padding: 2px 7px;
+    border-radius: 5px;
+    border: 1px solid transparent;
+    white-space: nowrap;
+  }
+
+  .trans-pill.trans-sequential {
+    color: #4ade80;
+    background: rgba(34, 197, 94, 0.14);
+    border-color: rgba(34, 197, 94, 0.4);
+  }
+
+  .trans-pill.trans-clutch {
+    color: #fbbf24;
+    background: rgba(245, 158, 11, 0.14);
+    border-color: rgba(245, 158, 11, 0.4);
+  }
+
+  .trans-pill.trans-unknown {
+    color: #64748b;
+    background: rgba(100, 116, 139, 0.12);
+    border-color: rgba(100, 116, 139, 0.32);
+  }
+
+  .clutch-pill {
+    flex-shrink: 0;
+    font-size: 9px;
+    font-weight: 700;
+    letter-spacing: 0.04em;
+    line-height: 1;
+    padding: 2px 7px;
+    border-radius: 5px;
+    color: #94a3b8;
+    background: rgba(148, 163, 184, 0.12);
+    border: 1px solid rgba(148, 163, 184, 0.32);
+    white-space: nowrap;
+  }
+
+  .clutch-pill.on {
+    color: #fb7185;
+    background: rgba(244, 63, 94, 0.16);
+    border-color: rgba(244, 63, 94, 0.48);
+  }
+
+  .actions {
+    display: flex;
+    gap: 3px;
+    flex-shrink: 0;
+  }
+
+  .btn {
+    -webkit-app-region: no-drag;
+    background: var(--hud-chrome-btn-bg, rgba(255, 255, 255, 0.06));
+    border: 1px solid var(--hud-chrome-btn-border, rgba(255, 255, 255, 0.1));
+    color: var(--hud-chrome-btn-fg, #94a3b8);
+    border-radius: 6px;
+    width: 22px;
+    height: 22px;
+    cursor: pointer;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    opacity: 1;
+    transition:
+      background 150ms,
+      border-color 150ms,
+      color 150ms;
+  }
+
+  .btn:hover {
+    background: var(--hud-chrome-btn-hover-bg, rgba(255, 255, 255, 0.12));
+    color: var(--hud-chrome-btn-hover-fg, #e2e8f0);
+  }
+
+  .btn.active {
+    background: var(--hud-chrome-btn-active-bg, rgba(255, 255, 255, 0.18));
+    border-color: var(--hud-chrome-btn-active-border, rgba(255, 255, 255, 0.28));
+    color: var(--hud-chrome-btn-active-fg, #ffffff);
+  }
+</style>

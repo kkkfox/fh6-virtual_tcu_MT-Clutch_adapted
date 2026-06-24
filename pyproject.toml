@@ -1,0 +1,38 @@
+[project]
+name = "virtual-tcu"
+version = "13.8.2"
+requires-python = ">=3.12"
+dependencies = [
+    "keyboard>=0.13.5",
+    "aiohttp>=3.9.0",
+    "pypresence>=4.3.0",
+]
+
+[dependency-groups]
+dev = [
+    "ruff>=0.9.0",
+    "pytest>=8.0",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+addopts = "-q"
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+src = ["virtual_tcu"]
+# Third-party / tooling trees (ESLint already ignores .cursor/** in eslint.config.ts)
+extend-exclude = [".cursor", ".claude"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+ignore = []
+
+[tool.ruff.lint.per-file-ignores]
+"virtual_tcu/app.py" = []
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"

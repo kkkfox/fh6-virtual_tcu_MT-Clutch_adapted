@@ -1,0 +1,21 @@
+diff --git a/apps/electron/src/hud-renderer/HudChrome.vue b/apps/electron/src/hud-renderer/HudChrome.vue
+index 42058da..275b274 100644
+--- a/apps/electron/src/hud-renderer/HudChrome.vue
++++ b/apps/electron/src/hud-renderer/HudChrome.vue
+@@ -28,6 +28,16 @@
+   const { t } = useI18n()
+   const modeLabel = computed(() => t(hudModeI18nKey(props.mode)))
+ 
++  const learnLabel = computed(() => {
++    if (props.learnState === 'relearning') return t('calibration.crossoverRelearning')
++    if (props.learnState === 'learned') return t('calibration.crossoverLearned')
++    const total = Number(props.learnTargetGears ?? 0)
++    const done = Number(props.learnMatureGears ?? 0)
++    return total > 0
++      ? t('calibration.crossoverProgress', { done, total })
++      : t('calibration.crossoverLearning')
++  })
++
+   const relearnLabel = computed(() => {
+     const s = props.relearnStatus
+     if (!s) return ''

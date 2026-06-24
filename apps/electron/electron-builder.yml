@@ -1,0 +1,54 @@
+appId: com.virtualtcu.app
+productName: VirtualTCU
+copyright: Copyright (c) 2026 Virtual TCU
+directories:
+  output: release
+  buildResources: build
+
+files:
+  - out/**/*
+  - package.json
+
+# Bundle the PyInstaller onedir output (built outside this directory) as
+# extraResources/backend/VirtualTCU.exe. The Electron main process spawns it
+# with --backend-only at startup.
+extraResources:
+  - from: ../../dist/VirtualTCU
+    to: backend
+    filter:
+      - '**/*'
+  - from: build/icon.ico
+    to: icon.ico
+
+asar: true
+asarUnpack: []
+
+win:
+  target:
+    - target: nsis
+      arch: x64
+    - target: zip
+      arch: x64
+  artifactName: ${productName}-${version}-win64.${ext}
+  # highestAvailable: run elevated when the user launched as admin (keyboard
+  # injection), otherwise asInvoker so the NSIS uninstaller can terminate the
+  # process without an elevation mismatch.
+  requestedExecutionLevel: highestAvailable
+  icon: build/icon.ico
+
+nsis:
+  oneClick: false
+  perMachine: false
+  allowToChangeInstallationDirectory: true
+  allowElevation: true
+  deleteAppDataOnUninstall: false
+  createDesktopShortcut: true
+  createStartMenuShortcut: true
+  shortcutName: VirtualTCU
+  include: build/installer.nsh
+
+publish:
+  - provider: github
+    owner: kkkfox
+    repo: fh6-virtual_tcu_MT-Clutch_adapted
+    releaseType: release

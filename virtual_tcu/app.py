@@ -1,0 +1,219 @@
+import argparse
+import asyncio
+import sys
+import time
+import webbrowser
+
+import keyboard
+
+from virtual_tcu import paths
+from virtual_tcu.config.constants import Cfg
+from virtual_tcu.config.store import ConfigStore
+from virtual_tcu.config.web_bind import format_startup_urls, web_urls
+from virtual_tcu.console import configure_stdio_utf8
+from virtual_tcu.deps import AIOHTTP_OK
+from virtual_tcu.input import KeyboardOutput
+from virtual_tcu.input.vjoy_output import VJoyOutput
+from virtual_tcu.logic.tcu import TCULogic
+from virtual_tcu.storage.profiles import ProfileStore
+from virtual_tcu.telemetry.log_capture import log_capture
+from virtual_tcu.telemetry.logger import TelemetryLogger
+from virtual_tcu.telemetry.receiver import TelemetryReceiver
+from virtual_tcu.web.server import WebServer
+
+# Marker the Electron shell waits for on stdout before showing the main window.
+BACKEND_READY_MARKER = "[backend-ready]"
+
+
+def clutch_assist_enabled(config: ConfigStore) -> bool:
+    return bool(config.get("feat_clutch_assist", False)) or bool(
+        config.get("vjoy_use_clutch", False)
+    )
+
+
+def toggle_clutch_assist(config: ConfigStore) -> bool:
+    enabled = not clutch_assist_enabled(config)
+    config.set("feat_clutch_assist", enabled)
+    config.set("vjoy_use_clutch", enabled)
+    config.set("feat_rev_blip", enabled)
+    return enabled
+
+
+async def headless_loop():
+    print("  [.] Running headless (no aiohttp). Press Ctrl+C to stop.")
+    stop_event = asyncio.Event()
+    await stop_event.wait()
+
+
+async def main_async(receiver, tcu, config, logger, *, backend_only: bool = False):
+    if not AIOHTTP_OK:
+        await headless_loop()
+        return
+
+    server = WebServer(
+        receiver,
+        tcu,
+        config,
+        logger,
+        ui_mode="view_only" if backend_only else "full",
+    )
+    await server.start()
+    urls = format_startup_urls(config)
+    print(f"  [OK] Web UI at {urls[0]}" + (f", {urls[1]}" if len(urls) > 1 else ""))
+    url = web_urls(config)["local"]
+    await asyncio.sleep(0.5)
+
+    if backend_only:
+        # Electron shell drives the UI; skip browser-open and last-run marker
+        # so the standalone exe can be relaunched without flicker.
+        print(BACKEND_READY_MARKER, flush=True)
+    else:
+        marker = paths.last_run_marker()
+        should_open = True
+        if marker.exists():
+            try:
+                if (time.time() - marker.stat().st_mtime) < 30:
+                    should_open = False
+            except Exception:
+                pass
+
+        if should_open:
+            try:
+                webbrowser.open(url)
+            except Exception:
+                pass
+
+        try:
+            marker.touch()
+        except Exception:
+            pass
+
+    try:
+        stop_event = asyncio.Event()
+        await stop_event.wait()
+    finally:
+        await server.stop()
+
+
+def setup_hotkeys(tcu: TCULogic, config: ConfigStore, logger: TelemetryLogger):
+    last_press = {}
+
+    def make_debounced(name, fn):
+        def wrapped():
+            now = time.time()
+            if (now - last_press.get(name, 0.0)) < 0.4:
+                return
+            last_press[name] = now
+            try:
+                fn()
+            except Exception as e:
+                print(f"  [hotkey {name}] {e}")
+
+        return wrapped
+
+    bindings = [
+        (config.get("hotkey_cycle_mode", "f9"), "cycle_mode", lambda: tcu.cycle_mode()),
+        (
+            config.get("hotkey_snapshot", "f8"),
+            "snapshot_dump",
+            lambda: tcu.trigger_fusion_snapshot("manual_dump"),
+        ),
+        (
+            config.get("hotkey_crossover_relearn", "f7"),
+            "crossover_relearn",
+            lambda: tcu.reset_crossover_learning(),
+        ),
+        (
+            config.get("hotkey_toggle_clutch", "f10"),
+            "toggle_clutch",
+            lambda: print(
+                f"  [Clutch] {'ON' if toggle_clutch_assist(config) else 'OFF'}"
+            ),
+        ),
+    ]
+
+    for key, name, fn in bindings:
+        if key:
+            try:
+                keyboard.add_hotkey(key, make_debounced(name, fn))
+            except Exception as e:
+                print(f"  [!] hotkey {key} failed: {e}")
+
+
+def banner():
+    from virtual_tcu import __version__
+
+    print("=" * 66)
+    print(f"  VIRTUAL TCU v{__version__}  -  FH6")
+    print("=" * 66)
+
+
+def main():
+    configure_stdio_utf8()
+    log_capture.install()
+
+    if sys.platform != "win32":
+        print("[ERROR] Windows only.")
+        sys.exit(1)
+
+    parser = argparse.ArgumentParser(prog="virtual_tcu", add_help=True)
+    parser.add_argument(
+        "--backend-only",
+        action="store_true",
+        help="Run as a headless backend (no auto-open browser); used by the Electron shell.",
+    )
+    args, _unknown = parser.parse_known_args()
+
+    banner()
+
+    config = ConfigStore()
+    profiles = ProfileStore()
+    logger = TelemetryLogger()
+    output_mode = config.get("output_mode", "keyboard")
+
+    if output_mode == "vjoy":
+        try:
+            kb = VJoyOutput(config)
+        except RuntimeError as e:
+            print("-" * 66)
+            print("  [!!] VJOY MODE UNAVAILABLE")
+            print(f"  {e}")
+            print("  The vJoy driver is not installed.")
+            print("  After installing and rebooting, vJoy mode will activate")
+            print("  automatically (output_mode is already set to 'vjoy').")
+            print("-" * 66)
+            kb = KeyboardOutput(config)
+            # Do NOT overwrite output_mode — the user explicitly chose vjoy.
+            # Their preference is preserved so it takes effect once the driver
+            # is installed and the backend is restarted.
+    else:
+        kb = KeyboardOutput(config)
+
+    tcu = TCULogic(kb, profiles, config, logger)
+    setup_hotkeys(tcu, config, logger)
+
+    receiver = TelemetryReceiver(logger, on_packet=tcu.process, config=config)
+    if not receiver.start():
+        from virtual_tcu.bootstrap import report_fatal
+
+        report_fatal(
+            f"UDP port {config.get('udp_port', Cfg.UDP_PORT)} bind failed. {receiver.error_msg}"
+        )
+
+    # AIOHTTP Windows Event Loop Exception Fix
+    if sys.platform == "win32":
+        asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+
+    try:
+        asyncio.run(main_async(receiver, tcu, config, logger, backend_only=args.backend_only))
+    except KeyboardInterrupt:
+        print("\n  Shutting down...")
+    finally:
+        logger.stop()
+        receiver.stop()
+        kb.shutdown()
+        tcu.shutdown()
+
+
+if __name__ == "__main__":
+    main()

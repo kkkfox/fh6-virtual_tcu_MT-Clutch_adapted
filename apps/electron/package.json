@@ -1,0 +1,46 @@
+{
+  "name": "virtual-tcu",
+  "productName": "VirtualTCU",
+  "version": "13.8.2",
+  "private": true,
+  "description": "External adaptive transmission controller for Forza Horizon 6 — Electron shell",
+  "author": "Virtual TCU",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/kkkfox/fh6-virtual_tcu_MT-Clutch_adapted.git"
+  },
+  "main": "out/main/index.js",
+  "scripts": {
+    "dev": "electron-vite dev",
+    "build": "electron-vite build",
+    "preview": "electron-vite preview",
+    "typecheck": "vue-tsc --noEmit -p tsconfig.json",
+    "prepackage": "node ../../scripts/sync-version.mjs",
+    "package": "electron-vite build && cd ../.. && npx electron-builder --win --publish never --config electron-builder.yml",
+    "release": "electron-vite build && cd ../.. && npx electron-builder --win --publish always --config electron-builder.yml",
+    "lint": "eslint .",
+    "format": "prettier --write ."
+  },
+  "dependencies": {
+    "@electron-toolkit/utils": "^4.0.0",
+    "@vicons/ionicons5": "^0.13.0",
+    "@virtual-tcu/shared": "workspace:*",
+    "@virtual-tcu/ui": "workspace:*",
+    "electron-updater": "^6.8.6",
+    "naive-ui": "^2.44.1",
+    "semver": "^7.7.4",
+    "vue": "^3.5.13",
+    "vue-i18n": "^11.1.2"
+  },
+  "devDependencies": {
+    "@tailwindcss/vite": "^4.1.3",
+    "@types/node": "^22.10.0",
+    "@vitejs/plugin-vue": "^6.0.7",
+    "electron": "42.2.0",
+    "electron-builder": "^26.11.1",
+    "electron-vite": "^5.0.0",
+    "tailwindcss": "^4.1.4",
+    "vite": "^7.3.2"
+  }
+}

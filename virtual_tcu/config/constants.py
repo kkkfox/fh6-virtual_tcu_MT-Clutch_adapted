@@ -1,0 +1,142 @@
+class Cfg:
+    UDP_IP = "0.0.0.0"
+    UDP_PORT = 5300
+    WEB_HOST = "127.0.0.1"
+    WEB_PORT = 8765
+    CONFIG_FILE = "tcu_config.json"
+    PROFILES_FILE = "tcu_profiles.json"
+    LOG_DIR = "logs"
+    KEY_HOLD_S = 0.04
+    SHIFT_COOLDOWN_MS = 350
+    POST_BRAKE_GRACE_MS = 600
+    LOW_GEAR_LOCK_MS = 800
+    # Wait for the game to acknowledge an upshift before retrying (prevents E-key spam).
+    UPSHIFT_PENDING_TIMEOUT_S = 1.2
+    # After a low-gear upshift is rejected, wait this long before clearing the soft cap
+    # and allowing another attempt (still at WOT / redline).
+    UPSHIFT_CAP_RETRY_S = 0.8
+    # At/above this gear, a rejected upshift keeps a hard cap (e.g. 6-speed cannot take 7th).
+    UPSHIFT_CAP_HARD_FROM_GEAR = 6
+    # Lowest gear that the upshift cap can ever lock at.  Caps at gear 1 are
+    # almost certainly transient failures (IME stealing injected keys, window
+    # focus loss, etc.) and must never make autoshift permanently dead.
+    UPSHIFT_CAP_MIN_FLOOR = 2
+    # Below this gear, don't count consecutive rejections toward a permanent
+    # (sticky) cap — same rationale as UPSHIFT_CAP_MIN_FLOOR.
+    UPSHIFT_CAP_CONFIRM_FROM_GEAR = 3
+    REVERSE_EXIT_LOCK_S = 2.0
+    ANTI_STALL_RPM = 1100
+    MIN_SPEED_KMH = 12.0
+    OVER_REV_LIMIT = 1.02
+    # Tractive-force crossover upshift. When the per-car ratio + torque curve
+    # are warm enough, the optimal upshift point is found by force crossover
+    # (see PowerCurveDetector.crossover_upshift_ok) instead of a fixed rpm%.
+    # The configured WOT rpm% then acts as an *early floor*: crossover may push
+    # the realised point later (toward the limiter) but never earlier than this.
+    #
+    # NOTE: this band used to be 0.06, which let the floor sit *below* peak
+    # power (target_pct - 0.06 == peak-power% - 3%), so the model could shift
+    # before peak power on every gear. The max-acceleration crossover is at or
+    # above peak power, so the floor must not undercut it. 0.0 pins the floor at
+    # the per-mode WOT target (peak-power% + offset), matching the upstream
+    # T-GT II behaviour (floor == peak-power rpm + margin). For peaky engines
+    # whose true crossover is below the floor, the crossover test is still the
+    # binding constraint, so this only removes premature sub-peak-power shifts.
+    CROSSOVER_EARLY_BAND = 0.0
+    # The crossover test is only trusted once the engine has actually been
+    # revved this close to the limiter on the current car. Below it the torque
+    # parabola is dominated by mid-range samples and fabricates a high-rpm
+    # roll-off, which makes the force crossover fire early; that early shift
+    # then starves the model of the very high-rpm samples that would correct it
+    # (a self-reinforcing loop). Holding the upshift toward this rpm during the
+    # learning phase harvests the top-end samples and breaks the loop, after
+    # which the crossover takes over. See PowerCurveDetector.is_crossover_mature.
+    CROSSOVER_MATURE_MAX_R = 0.93
+    # Hard late ceiling: take the shift here regardless of the crossover test,
+    # so a wide-ratio gear never floats the limiter waiting for crossover.
+    UPSHIFT_LIMITER_CEIL = 0.99
+    IMPACT_DECEL_KMH = 25.0  # single-frame speed collapse this large = a crash/impact
+    REVERSE_HOLD_MS = 700
+    REVERSE_EXIT_MS = 500
+    BRAKE_SPIKE_DELTA = 0.30
+    LOG_MAX_MB = 10
+    LOG_FILE_PREFIX = "tcu_replay"
+
+
+DEFAULTS = {
+    "comfort_up_idle": 40,
+    "comfort_up_mid": 58,
+    "comfort_up_wot": 82,
+    "dynamic_up_idle": 42,
+    "dynamic_up_mid": 58,
+    "dynamic_up_wot": 82,
+    "race_up_idle": 70,
+    "race_up_mid": 80,
+    "race_up_wot": 94,
+    "race_power_thr": 68,
+    "race_power_floor": 60,
+    "race_coast_rpm": 30,
+    "drift_up": 92,
+    "drift_down": 65,
+    "offroad_up_idle": 35,
+    "offroad_up_mid": 72,
+    "offroad_up_wot": 90,
+    "offroad_down_rpm": 55,
+    "offroad_coast_rpm": 32,
+    "brake_thr": 35,
+    "kickdown_pedal": 78,
+    "kickdown_rpm": 50,
+    "coast_down_rpm": 28,
+    "launch_rpm": 4500,
+    "cornering_yaw": 22,
+    "feat_cornering_lock": True,
+    "feat_launch_control": True,
+    "feat_brake_curve": True,
+    "feat_drivetrain_aware": True,
+    "feat_per_car_profiles": True,
+    "feat_shift_advisor": True,
+    "feat_reverse_hold": True,
+    "feat_sound_beep": False,
+    "feat_discord_rpc": False,
+    "feat_power_curve": True,
+    "feat_crossover_upshift": True,
+    "feat_engine_brake": True,
+    "feat_turbo_compensate": True,
+    "feat_airtime_lock": True,
+    "feat_landing_recovery": True,
+    "feat_transient_lock": True,
+    "feat_drive_style": True,
+    "feat_fusion_logger": False,
+    "log_output_format": "bin.gz",
+    "hotkey_cycle_mode": "f9",
+    "hotkey_snapshot": "f8",
+    "hotkey_crossover_relearn": "f7",
+    "hotkey_toggle_clutch": "f10",
+    "vjoy_direct_shift": True,
+    "vjoy_use_clutch": False,
+    "vjoy_shift_key_up": "B13",
+    "vjoy_shift_key_down": "B14",
+    "vjoy_clutch_key": "B12",
+    "shift_key_up": "e",
+    "shift_key_down": "q",
+    "output_mode": "keyboard",
+    # Clutch assist (keyboard only; vjoy uses vjoy_use_clutch)
+    "feat_clutch_assist": True,
+    "feat_rev_blip": True,  # downshift rev-match blip, forced on when clutch assist is active
+    "clutch_key": "shift",  # keyboard clutch key (FH6 = shift)
+    "throttle_key": "w",  # keyboard throttle key (FH6 default = w); used by the F7 relearn blip
+    "feat_relearn_blip": True,  # F7 relearn auto-revs to fuel cut (clutch + throttle) when parked
+    "relearn_blip_timeout_ms": 1500,  # max time to hold throttle waiting for the fuel-cut lock
+    "clutch_pre_ms": 5,  # ms between clutch press and shift key press
+    "clutch_overlap_ms": 55,  # ms shift key is held while clutch is down
+    "clutch_release_ms": 25,  # ms between shift key release and clutch release
+    "blip_key": "w",  # throttle key for rev-blip on downshift (match in-game throttle)
+    "blip_ms": 70,  # ms to hold throttle for rev-blip
+    "current_mode": "COMFORT",
+    "web_host": "127.0.0.1",
+    "web_port": 8765,
+    "udp_port": 5300,
+    "udp_hub_enabled": False,
+    "udp_hub_targets": "",
+    "hud_template": "classic",
+}

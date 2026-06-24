@@ -1,0 +1,820 @@
+From c54b914e07c7dfb1a461464753b4c7de8ab62082 Mon Sep 17 00:00:00 2001
+From: qq00qq00 <qq00qq00@users.noreply.github.com>
+Date: Sun, 14 Jun 2026 22:38:12 +0000
+Subject: [PATCH] =?UTF-8?q?feat(relearn):=20F7=20fuel-cut=20blip=20?=
+ =?UTF-8?q?=E2=80=94=20auto=20clutch+throttle,=20vJoy=20+=20HUD=20status?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+F7 relearn becomes a full relearn: besides gear ratios and the power curve it
+also clears the learned rev limiter, then (when parked) auto-engages the clutch
+and floors the throttle to free-rev the engine to its fuel cut so the rev
+limiter relearns on the spot. Fixes cars stuck in "learning…" forever because
+rpm_pct was normalised against the nominal EngineMaxRpm instead of the real cut.
+
+- config: throttle_key (default w), feat_relearn_blip, relearn_blip_timeout_ms
+- output: relearn_blip_supported/begin/end on the interface; keyboard holds
+  clutch+throttle; vJoy holds keyboard throttle + (vJoy or keyboard) clutch
+- tcu: full clear incl. rev limiter; blip runs OFF the data lock so observe()
+  keeps learning; shift output suppressed during the blip; stationary/race-on
+  gate; aborts if the car moves (Automatic transmission)
+- status: transient relearn_status (+rpm) in telemetry, surfaced on the HUD
+  pill, ModeSidebar and SettingsOverview
+- ui: throttle-key field + F7 note in Advanced settings; en/zh strings
+---
+ apps/electron/src/hud-renderer/HudApp.ts      |   2 +
+ apps/electron/src/hud-renderer/HudChrome.vue  |  30 ++--
+ apps/electron/src/hud-renderer/hud-view.ts    |   4 +
+ .../templates/HudTemplateClassic.vue          |   4 +
+ .../templates/HudTemplateMinimal.vue          |   4 +
+ .../templates/HudTemplateRacing.vue           |   4 +
+ packages/shared/src/config/settings.ts        |   4 +
+ packages/shared/src/locales/en.ts             |   7 +
+ packages/shared/src/locales/zh-CN.ts          |   7 +
+ packages/shared/src/types/telemetry.ts        |   2 +
+ packages/ui/src/layout/ModeSidebar.vue        |  15 ++
+ packages/ui/src/settings/SettingsAdvanced.vue |  38 ++++-
+ packages/ui/src/settings/SettingsOverview.vue |  19 ++-
+ virtual_tcu/config/constants.py               |   3 +
+ virtual_tcu/input/interface.py                |  15 ++
+ virtual_tcu/input/keyboard_output.py          |  34 +++++
+ virtual_tcu/input/vjoy_output.py              |  46 ++++++
+ virtual_tcu/logic/tcu.py                      | 131 ++++++++++++++++--
+ 18 files changed, 340 insertions(+), 29 deletions(-)
+
+diff --git a/apps/electron/src/hud-renderer/HudApp.ts b/apps/electron/src/hud-renderer/HudApp.ts
+index d54fc3d..e8e633c 100644
+--- a/apps/electron/src/hud-renderer/HudApp.ts
++++ b/apps/electron/src/hud-renderer/HudApp.ts
+@@ -145,6 +145,8 @@ export function useHudApp() {
+     showShiftAdvisor: view.showShiftAdvisor.value,
+     showShiftBanner: view.showShiftBanner.value,
+     crossoverLearnState: view.crossoverLearnState.value,
++    relearnStatus: view.relearnStatus.value,
++    relearnStatusRpm: view.relearnStatusRpm.value,
+     learnMatureGears: view.learnMatureGears.value,
+     learnTargetGears: view.learnTargetGears.value,
+   }))
+diff --git a/apps/electron/src/hud-renderer/HudChrome.vue b/apps/electron/src/hud-renderer/HudChrome.vue
+index 8015458..42058da 100644
+--- a/apps/electron/src/hud-renderer/HudChrome.vue
++++ b/apps/electron/src/hud-renderer/HudChrome.vue
+@@ -14,6 +14,8 @@
+       learnState?: string
+       learnMatureGears?: number
+       learnTargetGears?: number
++      relearnStatus?: string
++      relearnStatusRpm?: number
+     }>(),
+     { compact: false, footer: false, learnState: 'learning' },
+   )
+@@ -26,14 +28,22 @@
+   const { t } = useI18n()
+   const modeLabel = computed(() => t(hudModeI18nKey(props.mode)))
+ 
+-  const learnLabel = computed(() => {
+-    if (props.learnState === 'relearning') return t('calibration.crossoverRelearning')
+-    if (props.learnState === 'learned') return t('calibration.crossoverLearned')
+-    const total = Number(props.learnTargetGears ?? 0)
+-    const done = Number(props.learnMatureGears ?? 0)
+-    return total > 0
+-      ? t('calibration.crossoverProgress', { done, total })
+-      : t('calibration.crossoverLearning')
++  const relearnLabel = computed(() => {
++    const s = props.relearnStatus
++    if (!s) return ''
++    if (s === 'learned') {
++      return t('calibration.relearnLearned', { rpm: Math.round(Number(props.relearnStatusRpm ?? 0)) })
++    }
++    if (s === 'aborted_moved') return t('calibration.relearnAbortedMoved')
++    if (s === 'timeout') return t('calibration.relearnTimeout')
++    return t('calibration.relearnSkipped')
++  })
++
++  const pillLabel = computed(() => relearnLabel.value || learnLabel.value)
++  const pillClass = computed(() => {
++    const s = props.relearnStatus
++    if (s) return s === 'learned' ? 'learned' : 'relearning'
++    return props.learnState
+   })
+ </script>
+ 
+@@ -53,8 +63,8 @@
+       </template>
+     </div>
+ 
+-    <span class="learn-pill" :class="learnState" :title="t('calibration.crossover')">{{
+-      learnLabel
++    <span class="learn-pill" :class="pillClass" :title="t('calibration.crossover')">{{
++      pillLabel
+     }}</span>
+ 
+     <div class="actions interactive">
+diff --git a/apps/electron/src/hud-renderer/hud-view.ts b/apps/electron/src/hud-renderer/hud-view.ts
+index f16a409..c3f0c43 100644
+--- a/apps/electron/src/hud-renderer/hud-view.ts
++++ b/apps/electron/src/hud-renderer/hud-view.ts
+@@ -75,6 +75,8 @@ export function useHudView(
+     if (telemetry.value.crossover_learned) return 'learned'
+     return 'learning'
+   })
++  const relearnStatus = computed<string>(() => telemetry.value.relearn_status ?? '')
++  const relearnStatusRpm = computed<number>(() => Number(telemetry.value.relearn_status_rpm ?? 0))
+   const learnMatureGears = computed(() => telemetry.value.learn_mature_gears ?? 0)
+   const learnTargetGears = computed(() => telemetry.value.learn_target_gears ?? 0)
+ 
+@@ -94,6 +96,8 @@ export function useHudView(
+     gearColor,
+     gearStyle,
+     crossoverLearnState,
++    relearnStatus,
++    relearnStatusRpm,
+     learnMatureGears,
+     learnTargetGears,
+   }
+diff --git a/apps/electron/src/hud-renderer/templates/HudTemplateClassic.vue b/apps/electron/src/hud-renderer/templates/HudTemplateClassic.vue
+index 04fdccc..89146b2 100644
+--- a/apps/electron/src/hud-renderer/templates/HudTemplateClassic.vue
++++ b/apps/electron/src/hud-renderer/templates/HudTemplateClassic.vue
+@@ -23,6 +23,8 @@
+     shiftAdvice: ShiftAdvice
+     showShiftAdvisor: boolean
+     crossoverLearnState: string
++    relearnStatus?: string
++    relearnStatusRpm?: number
+     learnMatureGears?: number
+     learnTargetGears?: number
+   }>()
+@@ -41,6 +43,8 @@
+       :tcu-state="tcuState"
+       :click-through="clickThrough"
+       :learn-state="crossoverLearnState"
++      :relearn-status="relearnStatus"
++      :relearn-status-rpm="relearnStatusRpm"
+       :learn-mature-gears="learnMatureGears"
+       :learn-target-gears="learnTargetGears"
+       @toggle-click-through="emit('toggleClickThrough', $event)"
+diff --git a/apps/electron/src/hud-renderer/templates/HudTemplateMinimal.vue b/apps/electron/src/hud-renderer/templates/HudTemplateMinimal.vue
+index 79647ec..08e2465 100644
+--- a/apps/electron/src/hud-renderer/templates/HudTemplateMinimal.vue
++++ b/apps/electron/src/hud-renderer/templates/HudTemplateMinimal.vue
+@@ -23,6 +23,8 @@
+     shiftAdvice: ShiftAdvice
+     showShiftAdvisor: boolean
+     crossoverLearnState: string
++    relearnStatus?: string
++    relearnStatusRpm?: number
+     learnMatureGears?: number
+     learnTargetGears?: number
+   }>()
+@@ -67,6 +69,8 @@
+         :tcu-state="tcuState"
+         :click-through="clickThrough"
+         :learn-state="crossoverLearnState"
++        :relearn-status="relearnStatus"
++        :relearn-status-rpm="relearnStatusRpm"
+         :learn-mature-gears="learnMatureGears"
+         :learn-target-gears="learnTargetGears"
+         @toggle-click-through="emit('toggleClickThrough', $event)"
+diff --git a/apps/electron/src/hud-renderer/templates/HudTemplateRacing.vue b/apps/electron/src/hud-renderer/templates/HudTemplateRacing.vue
+index a9f1695..94052b8 100644
+--- a/apps/electron/src/hud-renderer/templates/HudTemplateRacing.vue
++++ b/apps/electron/src/hud-renderer/templates/HudTemplateRacing.vue
+@@ -24,6 +24,8 @@
+     shiftAdvice: ShiftAdvice
+     showShiftAdvisor: boolean
+     crossoverLearnState: string
++    relearnStatus?: string
++    relearnStatusRpm?: number
+     learnMatureGears?: number
+     learnTargetGears?: number
+   }>()
+@@ -42,6 +44,8 @@
+       :tcu-state="tcuState"
+       :click-through="clickThrough"
+       :learn-state="crossoverLearnState"
++      :relearn-status="relearnStatus"
++      :relearn-status-rpm="relearnStatusRpm"
+       :learn-mature-gears="learnMatureGears"
+       :learn-target-gears="learnTargetGears"
+       @toggle-click-through="emit('toggleClickThrough', $event)"
+diff --git a/packages/shared/src/config/settings.ts b/packages/shared/src/config/settings.ts
+index 78b80aa..40ddda4 100644
+--- a/packages/shared/src/config/settings.ts
++++ b/packages/shared/src/config/settings.ts
+@@ -87,6 +87,10 @@ export const SHIFT_KEY_FIELDS = [
+   { key: 'shift_key_down', i18nKey: 'shiftKeyDown', placeholder: 'q' },
+ ] as const
+ 
++export const THROTTLE_KEY_FIELDS = [
++  { key: 'throttle_key', i18nKey: 'throttleKey', placeholder: 'w' },
++] as const
++
+ export const CLUTCH_ASSIST_FIELDS = [
+   { key: 'clutch_key', i18nKey: 'clutchKey', placeholder: 'shift' },
+ ] as const
+diff --git a/packages/shared/src/locales/en.ts b/packages/shared/src/locales/en.ts
+index f1e054b..01075b7 100644
+--- a/packages/shared/src/locales/en.ts
++++ b/packages/shared/src/locales/en.ts
+@@ -99,6 +99,10 @@ export default {
+     crossoverProgress: 'Learning {done}/{total}',
+     crossoverLearned: 'Learned',
+     crossoverRelearning: 'Relearning',
++    relearnLearned: 'Fuel cut {rpm} set',
++    relearnAbortedMoved: 'Aborted · car moved',
++    relearnTimeout: 'Aborted · no fuel cut',
++    relearnSkipped: 'Park the car, then F7',
+   },
+   driveStyle: {
+     title: 'Drive Style',
+@@ -347,6 +351,8 @@ export default {
+     shiftKeyHint: 'Must match your in-game upshift/downshift bindings. Applies immediately.',
+     shiftKeyUp: 'Upshift',
+     shiftKeyDown: 'Downshift',
++    throttleKey: 'Throttle key',
++    throttleKeyHint: 'Used by the F7 relearn to auto clutch + blip the throttle for the fuel cut. Match your in-game throttle key.',
+     clutchAssist: 'Clutch Assist (opt-in)',
+     clutchAssistHint:
+       'Press clutch key before each shift. For "Manual with Clutch" players only. Default off.',
+@@ -373,6 +379,7 @@ export default {
+     cycleMode: 'Cycle mode',
+     triggerSnapshot: 'Manual Snapshot',
+     crossoverRelearn: 'Crossover upshift relearn',
++    crossoverRelearnNote: 'When parked: clears gear ratios / power curve / fuel cut (full relearn) and auto clutch + throttle blips ~1.5s to remeasure the cut. Aborts if the car moves (Automatic).',
+     fullTuning: 'Drive modes — full tuning',
+   },
+   modal: {
+diff --git a/packages/shared/src/locales/zh-CN.ts b/packages/shared/src/locales/zh-CN.ts
+index a5fdd69..c1125ab 100644
+--- a/packages/shared/src/locales/zh-CN.ts
++++ b/packages/shared/src/locales/zh-CN.ts
+@@ -97,6 +97,10 @@ export default {
+     crossoverProgress: '学习中 {done}/{total}',
+     crossoverLearned: '已学会',
+     crossoverRelearning: '开始重学',
++    relearnLearned: '断油 {rpm} 已标定',
++    relearnAbortedMoved: '已中止 · 检测到移动',
++    relearnTimeout: '已中止 · 未摸到断油',
++    relearnSkipped: '请停车后再按 F7',
+   },
+   driveStyle: {
+     title: '驾驶风格',
+@@ -342,6 +346,8 @@ export default {
+     shiftKeyHint: '与游戏内升/降挡键一致，保存后立即生效。',
+     shiftKeyUp: '升挡',
+     shiftKeyDown: '降挡',
++    throttleKey: '油门键',
++    throttleKeyHint: 'F7 重学时自动踩离合 + 一脚油门摸断油用，与游戏内油门键一致。',
+     clutchAssist: '离合辅助（实验性）',
+     clutchAssistHint: '换挡前按下离合键，仅适用于"手动含离合"模式，默认关闭。',
+     clutchKey: '离合键',
+@@ -367,6 +373,7 @@ export default {
+     cycleMode: '切换模式',
+     triggerSnapshot: '手动快照',
+     crossoverRelearn: '牵引力交叉升档重学',
++    crossoverRelearnNote: '停车时按下：清除齿比 / 功率曲线 / 断油（全量重学），并自动踩离合 + 油门约 1.5s 摸断油。自动挡车辆移动会自动中止。',
+     fullTuning: '驾驶模式 — 完整调校',
+   },
+   modal: {
+diff --git a/packages/shared/src/types/telemetry.ts b/packages/shared/src/types/telemetry.ts
+index 35dc103..98813db 100644
+--- a/packages/shared/src/types/telemetry.ts
++++ b/packages/shared/src/types/telemetry.ts
+@@ -75,6 +75,8 @@ export interface TelemetrySnapshot {
+   power_curve_learned?: boolean
+   crossover_relearning?: boolean
+   crossover_learned?: boolean
++  relearn_status?: 'learned' | 'aborted_moved' | 'timeout' | 'skipped' | null
++  relearn_status_rpm?: number | null
+   learn_mature_gears?: number
+   learn_target_gears?: number
+   learn_progress?: number
+diff --git a/packages/ui/src/layout/ModeSidebar.vue b/packages/ui/src/layout/ModeSidebar.vue
+index 489a824..8bda3eb 100644
+--- a/packages/ui/src/layout/ModeSidebar.vue
++++ b/packages/ui/src/layout/ModeSidebar.vue
+@@ -47,6 +47,17 @@
+   const isCalibrated = () => !!telemetry.value?.calibrated
+   const { t } = useI18n()
+ 
++  const relearnMessage = (): string | null => {
++    const s = telemetry.value?.relearn_status
++    if (!s) return null
++    if (s === 'learned') {
++      const rpm = Math.round(Number(telemetry.value?.relearn_status_rpm ?? 0))
++      return t('calibration.relearnLearned', { rpm })
++    }
++    if (s === 'aborted_moved') return t('calibration.relearnAbortedMoved')
++    if (s === 'timeout') return t('calibration.relearnTimeout')
++    return t('calibration.relearnSkipped')
++  }
+   const crossoverState = (): 'learning' | 'learned' | 'relearning' => {
+     const tel = telemetry.value
+     if (tel?.crossover_relearning) return 'relearning'
+@@ -54,10 +65,14 @@
+     return 'learning'
+   }
+   const crossoverBadge = () => {
++    const rs = telemetry.value?.relearn_status
++    if (rs) return rs === 'learned' ? badgeCalibrated : badgeRelearn
+     const s = crossoverState()
+     return s === 'relearning' ? badgeRelearn : s === 'learned' ? badgeCalibrated : badgeLearning
+   }
+   const crossoverText = () => {
++    const msg = relearnMessage()
++    if (msg) return msg
+     const s = crossoverState()
+     if (s === 'relearning') return t('calibration.crossoverRelearning')
+     if (s === 'learned') return t('calibration.crossoverLearned')
+diff --git a/packages/ui/src/settings/SettingsAdvanced.vue b/packages/ui/src/settings/SettingsAdvanced.vue
+index 12afd14..f90381d 100644
+--- a/packages/ui/src/settings/SettingsAdvanced.vue
++++ b/packages/ui/src/settings/SettingsAdvanced.vue
+@@ -2,6 +2,7 @@
+   import {
+     CLUTCH_ASSIST_FIELDS,
+     CLUTCH_TIMING_SLIDERS,
++    THROTTLE_KEY_FIELDS,
+     VJOY_BUTTON_OPTIONS,
+     VJOY_SHIFT_BUTTON_FIELDS,
+   } from '@virtual-tcu/shared/config/settings'
+@@ -274,6 +275,28 @@
+           </NFlex>
+         </NGridItem>
+       </NGrid>
++      <NFlex
++        v-for="tk in THROTTLE_KEY_FIELDS"
++        :key="tk.key"
++        justify="space-between"
++        align="center"
++        :size="8"
++        style="margin-top: 16px"
++      >
++        <div style="flex: 1; padding-right: 12px">
++          <NText>{{ t(`extras.${tk.i18nKey}`) }}</NText>
++          <NText depth="3" style="font-size: 11px; display: block; margin-top: 2px">
++            {{ t('extras.throttleKeyHint') }}
++          </NText>
++        </div>
++        <NInput
++          :value="configText(tk.key)"
++          :placeholder="tk.placeholder"
++          size="small"
++          style="width: 100px; font-family: ui-monospace, monospace"
++          @update:value="(v) => store.setConfig(tk.key, v.trim().toLowerCase())"
++        />
++      </NFlex>
+       <NFlex justify="space-between" align="center" :size="8" style="margin-top: 16px">
+         <NText>{{ t('extras.clutchAssist') }}</NText>
+         <NSwitch
+@@ -339,9 +362,20 @@
+           </NFlex>
+         </NGridItem>
+       </NGrid>
++      <NText
++        depth="3"
++        style="
++          font-size: 11px;
++          display: block;
++          margin-top: 12px;
++          line-height: 1.5;
++          padding-top: 10px;
++          border-top: 1px solid var(--n-border-color, rgba(255, 255, 255, 0.08));
++        "
++      >
++        {{ t('extras.crossoverRelearnNote') }}
++      </NText>
+     </NCard>
+-
+-    <NCard :title="t('extras.fullTuning')" size="small" :bordered="false">
+       <NFlex vertical :size="14">
+         <div v-for="s in advancedSliders" :key="s.key">
+           <NFlex justify="space-between" align="center" style="margin-bottom: 4px">
+diff --git a/packages/ui/src/settings/SettingsOverview.vue b/packages/ui/src/settings/SettingsOverview.vue
+index 400461c..0c29265 100644
+--- a/packages/ui/src/settings/SettingsOverview.vue
++++ b/packages/ui/src/settings/SettingsOverview.vue
+@@ -8,6 +8,17 @@
+   const ctx = inject(settingsContextKey)!
+   const { t, store, driveModes, dashboardUrl, lanUrl, udpPort, openDashboard, toggleHud } = ctx
+ 
++  function relearnMessage(): string | null {
++    const s = store.telemetry.value?.relearn_status
++    if (!s) return null
++    if (s === 'learned') {
++      const rpm = Math.round(Number(store.telemetry.value?.relearn_status_rpm ?? 0))
++      return t('calibration.relearnLearned', { rpm })
++    }
++    if (s === 'aborted_moved') return t('calibration.relearnAbortedMoved')
++    if (s === 'timeout') return t('calibration.relearnTimeout')
++    return t('calibration.relearnSkipped')
++  }
+   function crossoverState(): 'learning' | 'learned' | 'relearning' {
+     const tel = store.telemetry.value
+     if (tel?.crossover_relearning) return 'relearning'
+@@ -15,10 +26,14 @@
+     return 'learning'
+   }
+   function crossoverTagType(): 'success' | 'warning' | 'info' {
+-    const s = crossoverState()
+-    return s === 'relearning' ? 'info' : s === 'learned' ? 'success' : 'warning'
++    const s = store.telemetry.value?.relearn_status
++    if (s) return s === 'learned' ? 'success' : 'warning'
++    const st = crossoverState()
++    return st === 'relearning' ? 'info' : st === 'learned' ? 'success' : 'warning'
+   }
+   function crossoverLabel(): string {
++    const msg = relearnMessage()
++    if (msg) return msg
+     const s = crossoverState()
+     if (s === 'relearning') return t('calibration.crossoverRelearning')
+     if (s === 'learned') return t('calibration.crossoverLearned')
+diff --git a/virtual_tcu/config/constants.py b/virtual_tcu/config/constants.py
+index a42083f..3a3b6db 100644
+--- a/virtual_tcu/config/constants.py
++++ b/virtual_tcu/config/constants.py
+@@ -115,6 +115,9 @@ DEFAULTS = {
+     # Clutch assist (keyboard only; vjoy uses vjoy_use_clutch)
+     "feat_clutch_assist": False,
+     "clutch_key": "shift",  # keyboard clutch key (FH6 = shift)
++    "throttle_key": "w",  # keyboard throttle key (FH6 default = w); used by the F7 relearn blip
++    "feat_relearn_blip": True,  # F7 relearn auto-revs to fuel cut (clutch + throttle) when parked
++    "relearn_blip_timeout_ms": 1500,  # max time to hold throttle waiting for the fuel-cut lock
+     "clutch_pre_ms": 20,  # ms between clutch press and shift key press
+     "clutch_overlap_ms": 55,  # ms shift key is held while clutch is down
+     "clutch_release_ms": 25,  # ms between shift key release and clutch release
+diff --git a/virtual_tcu/input/interface.py b/virtual_tcu/input/interface.py
+index 5c1f38b..019b97e 100644
+--- a/virtual_tcu/input/interface.py
++++ b/virtual_tcu/input/interface.py
+@@ -41,3 +41,18 @@ class OutputInterface(ABC):
+     def shutdown(self):
+         """Release any OS resources (thread pools, device handles, hooks)."""
+         ...
++
++    def relearn_blip_supported(self) -> bool:
++        """Whether this backend can hold throttle + clutch for the F7 relearn
++        fuel-cut blip. Defaults to False; only the keyboard backend overrides
++        it, since throttle/clutch are game keybinds the keyboard can drive."""
++        return False
++
++    def begin_relearn_blip(self, throttle_key: str, clutch_key: str) -> None:
++        """Engage clutch then floor throttle so the engine free-revs to the
++        fuel cut. Held until end_relearn_blip(). No-op unless supported."""
++        ...
++
++    def end_relearn_blip(self) -> None:
++        """Release the throttle and clutch held by begin_relearn_blip()."""
++        ...
+diff --git a/virtual_tcu/input/keyboard_output.py b/virtual_tcu/input/keyboard_output.py
+index 76409fb..5a70f60 100644
+--- a/virtual_tcu/input/keyboard_output.py
++++ b/virtual_tcu/input/keyboard_output.py
+@@ -31,6 +31,7 @@ class KeyboardOutput(OutputInterface):
+         self._config = config
+         self._self_press_until: dict[str, float] = {}
+         self.SELF_PRESS_WINDOW_S = 0.15
++        self._blip_keys: tuple[str, str] | None = None
+         # Single worker ensures keystrokes are executed sequentially without thread leaks
+         self._executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="KB_Worker")
+ 
+@@ -102,6 +103,39 @@ class KeyboardOutput(OutputInterface):
+     def shutdown(self):
+         self._executor.shutdown(wait=False)
+ 
++    # -- relearn fuel-cut blip -------------------------------------------------
++
++    def relearn_blip_supported(self) -> bool:
++        return True
++
++    def begin_relearn_blip(self, throttle_key: str, clutch_key: str) -> None:
++        """Hold clutch (declutch) then throttle so the engine free-revs to the
++        fuel cut with no wheel load — dodges the rev-limiter slip exclusion."""
++        ck = (clutch_key or "shift").lower()
++        tk = (throttle_key or "w").lower()
++        self._blip_keys = (ck, tk)
++        # Mark a generous self-press window so any paddle listener ignores the
++        # held throttle/clutch as injected input for the duration of the blip.
++        deadline = time.time() + 5.0
++        self._self_press_until[ck] = deadline
++        self._self_press_until[tk] = deadline
++        try:
++            keyboard.press(ck)
++            time.sleep(0.03)
++            keyboard.press(tk)
++        except Exception as e:
++            print(f"[KB] relearn blip press failed: {e}")
++
++    def end_relearn_blip(self) -> None:
++        ck, tk = self._blip_keys or ("shift", "w")
++        try:
++            keyboard.release(tk)
++            keyboard.release(ck)
++        except Exception as e:
++            print(f"[KB] relearn blip release failed: {e}")
++        finally:
++            self._blip_keys = None
++
+     # -- internals -------------------------------------------------------------
+ 
+     def _press_release(self, key: str):
+diff --git a/virtual_tcu/input/vjoy_output.py b/virtual_tcu/input/vjoy_output.py
+index 30f3c7b..372a8f2 100644
+--- a/virtual_tcu/input/vjoy_output.py
++++ b/virtual_tcu/input/vjoy_output.py
+@@ -1,6 +1,8 @@
+ import time
+ from concurrent.futures import ThreadPoolExecutor
+ 
++import keyboard
++
+ from virtual_tcu.config.store import ConfigStore
+ from virtual_tcu.input.interface import OutputInterface
+ 
+@@ -51,6 +53,7 @@ class VJoyOutput(OutputInterface):
+         self._v_device.reset()
+         self._v_device.reset_buttons()
+         self._v_device.update()
++        self._blip: dict | None = None
+ 
+     @property
+     def key_up(self) -> str:
+@@ -105,6 +108,49 @@ class VJoyOutput(OutputInterface):
+         self._v_device.update()
+         self._executor.shutdown(wait=False)
+ 
++    # -- relearn fuel-cut blip -------------------------------------------------
++
++    def relearn_blip_supported(self) -> bool:
++        return True
++
++    def begin_relearn_blip(self, throttle_key: str, clutch_key: str) -> None:
++        """Free-rev to the fuel cut for the F7 relearn. Throttle is always a
++        keyboard key (the vJoy device carries shift buttons, not the pedal);
++        the clutch uses the vJoy clutch button when ``vjoy_use_clutch`` is on,
++        otherwise the keyboard clutch key. If the player drives throttle on a
++        wheel pedal, the blip simply times out — no harm, no movement."""
++        tk = (throttle_key or "w").lower()
++        state: dict = {"tk": tk, "ck": None, "vjoy_clutch": None}
++        try:
++            if self.use_clutch:
++                cb = _BUTTON_MAP.get(self.key_clutch)
++                if cb is not None:
++                    self._v_device.set_button(cb, 1)
++                    state["vjoy_clutch"] = cb
++            else:
++                ck = (clutch_key or "shift").lower()
++                keyboard.press(ck)
++                state["ck"] = ck
++            time.sleep(0.03)
++            keyboard.press(tk)
++        except Exception as e:
++            print(f"[VJoy] relearn blip press failed: {e}")
++        self._blip = state
++
++    def end_relearn_blip(self) -> None:
++        b = self._blip or {}
++        try:
++            if b.get("tk"):
++                keyboard.release(b["tk"])
++            if b.get("ck"):
++                keyboard.release(b["ck"])
++            if b.get("vjoy_clutch") is not None:
++                self._v_device.set_button(b["vjoy_clutch"], 0)
++        except Exception as e:
++            print(f"[VJoy] relearn blip release failed: {e}")
++        finally:
++            self._blip = None
++
+     # -- internals -------------------------------------------------------------
+ 
+     def _press_release(self, name: str):
+diff --git a/virtual_tcu/logic/tcu.py b/virtual_tcu/logic/tcu.py
+index 7ea0a5e..05fe7ca 100644
+--- a/virtual_tcu/logic/tcu.py
++++ b/virtual_tcu/logic/tcu.py
+@@ -41,6 +41,10 @@ from virtual_tcu.telemetry.model import Telemetry
+ # live learned/learning state.
+ CROSSOVER_RELEARN_FLASH_S = 5.0
+ 
++# Above this speed (km/h) during a relearn blip we conclude the clutch did not
++# disengage (Automatic transmission) and abort before the car drives off.
++RELEARN_BLIP_MOVE_KMH = 3.0
++
+ # --- Crossover "learned" status thresholds ---
+ # Telemetry never reports a car's gear count, so the badge is gated on real
+ # coverage instead: per-gear ratio convergence, power-curve confidence, and a
+@@ -126,6 +130,14 @@ class TCULogic:
+         # monotonic deadline until which the crossover-upshift status reads as
+         # "relearning" (set by the relearn hotkey); 0 = not relearning.
+         self._crossover_relearn_until = 0.0
++        # True while the F7 fuel-cut blip holds throttle; suppresses shift output.
++        self._relearn_blip_active = False
++        # Transient, HUD-facing outcome of the last F7 relearn blip.
++        self._relearn_status: str | None = None
++        self._relearn_status_rpm: float | None = None
++        self._relearn_status_until = 0.0
++        # Most recent telemetry frame, for the (off-thread) relearn hotkey.
++        self._last_td: Telemetry | None = None
+ 
+         self._reverse_lock_until = 0.0
+         self._current_car_key: tuple | None = None
+@@ -228,27 +240,43 @@ class TCULogic:
+         self._max_gear_seen.pop(ck, None)
+         self._gear_plateau_s.pop(ck, None)
+ 
++    def _shift_to(self, from_gear: int, target_gear: int) -> None:
++        """Emit a shift unless a relearn fuel-cut blip is in progress (we hold
++        the engine against the limiter then, and must not auto-upshift)."""
++        if self._relearn_blip_active:
++            return
++        self._kb.shift_to(from_gear, target_gear)
++
+     def reset_crossover_learning(self) -> bool:
+         """Relearn the traction crossover-upshift model for the current car.
+ 
+-        Mirrors the T-GT II ``reset-current`` behaviour: the crossover upshift
+-        has no learned state of its own — it rides on the per-car gear ratios
+-        and power curve — so "relearning" means wiping those two inputs (in
+-        memory and in the persisted profile) and letting them rebuild from live
+-        telemetry. The engine rpm envelope (rev limiter / redline) is kept, as
+-        T-GT II keeps maxRpm/idleRpm. Arms the 5 s "relearning" status flash on
+-        the HUD and Dashboard. Returns True if a current car was reset.
++        The crossover upshift has no learned state of its own — it rides on the
++        per-car gear ratios and power curve — so "relearning" wipes those inputs
++        (in memory and in the persisted profile) and lets them rebuild from live
++        telemetry. This full relearn also clears the learned rev limiter / fuel
++        cut and, when the car is parked, fires a clutch+throttle blip to remeasure
++        it on the spot (see _run_relearn_blip). Arms the 5 s "relearning" status
++        flash on the HUD and Dashboard. Returns True if a current car was reset.
+         """
+         with self._data_lock:
+             ck = self._current_car_key
+             if ck is None or ck[0] <= 0:
+                 return False
++            if self._relearn_blip_active:
++                return False
+             # In-memory: drop the crossover inputs and the caps derived from them.
+             self._calibrator._ratios.pop(ck, None)
+             self._calibrator._counts.pop(ck, None)
+             self._power_curve._fits.pop(ck, None)
+             self._power_curve._max_r.pop(ck, None)
+             self._power_curve._min_r.pop(ck, None)
++            # Full relearn also drops the learned rev limiter / redline so the
++            # blip re-measures the fuel cut from scratch. The detector is
++            # rise-only, so a stale-high reading would never be corrected down
++            # unless we clear it first.
++            self._rev_limiter._redline.pop(ck, None)
++            self._rev_limiter._rpm_window.pop(ck, None)
++            self._rev_limiter._peak_hold.pop(ck, None)
+             self._profile_baseline_ratios.pop(ck, None)
+             self._drift_streak.pop(ck, None)
+             self._upshift_cap_by_key.pop(ck, None)
+@@ -256,16 +284,80 @@ class TCULogic:
+             self._cap_confirm.pop(ck, None)
+             self._max_gear_seen.pop(ck, None)
+             self._gear_plateau_s.pop(ck, None)
+-            # Persisted: strip the same two blocks so they don't reload; keep the
+-            # rest of the profile (rev limiter envelope, metadata).
++            # Persisted: strip the relearned blocks (incl. rev limiter) so they
++            # don't reload; keep the rest of the profile (metadata).
+             profile = self._profiles.get(ck)
+             if isinstance(profile, dict):
+-                for stale in ("gear_ratios", "gear_counts", "power_curve"):
++                for stale in ("gear_ratios", "gear_counts", "power_curve", "rev_limiter"):
+                     profile.pop(stale, None)
+                 self._profiles.set(ck, profile)
+             self._crossover_relearn_until = time.monotonic() + CROSSOVER_RELEARN_FLASH_S
+-            print(f"[Crossover] relearn {storage_key(ck)}: cleared gear ratios + power curve")
+-            return True
++            td = self._last_td
++            print(f"[Crossover] relearn {storage_key(ck)}: cleared gear ratios + power curve + rev limiter")
++        # Run the fuel-cut blip OUTSIDE the data lock: telemetry processing (and
++        # rev_limiter.observe, which is what actually learns the cut) must keep
++        # running on its own thread while we hold throttle here.
++        self._run_relearn_blip(ck, td)
++        return True
++
++    def _set_relearn_status(self, code: str, rpm: float | None = None, secs: float = 5.0) -> None:
++        self._relearn_status = code
++        self._relearn_status_rpm = rpm
++        self._relearn_status_until = time.monotonic() + secs
++
++    def _run_relearn_blip(self, ck: tuple, td: Telemetry | None) -> None:
++        """When parked, auto declutch + floor throttle to free-rev the engine to
++        its fuel cut so the rev limiter relearns immediately after an F7 reset."""
++        if not self._config.get("feat_relearn_blip", True):
++            return
++        if not self._kb.relearn_blip_supported():
++            self._set_relearn_status("skipped")
++            print("[Relearn] blip skipped: this output mode has no throttle channel — rev to fuel cut manually.")
++            return
++        # Stationary + live gate: only auto-rev when safely parked, on track.
++        now = time.time()
++        fresh = (now - self._last_packet_time) < 0.5
++        if (
++            td is None
++            or not fresh
++            or not bool(td.is_race_on)
++            or td.speed_kmh > 1.0
++            or self._airtime_state != "GROUND"
++        ):
++            self._set_relearn_status("skipped")
++            print("[Relearn] blip skipped: stop the car (race on, parked) before F7.")
++            return
++        throttle_key = str(self._config.get("throttle_key", "w")).lower()
++        clutch_key = str(self._config.get("clutch_key", "shift")).lower()
++        timeout_s = max(0.5, int(self._config.get("relearn_blip_timeout_ms", 1500)) / 1000.0)
++        self._relearn_blip_active = True
++        learned = moved = False
++        try:
++            self._kb.begin_relearn_blip(throttle_key, clutch_key)
++            deadline = time.monotonic() + timeout_s
++            while time.monotonic() < deadline:
++                time.sleep(0.05)
++                if self._rev_limiter.dump(ck) is not None:
++                    learned = True
++                    break
++                cur = self._last_td
++                if cur is not None and cur.speed_kmh > RELEARN_BLIP_MOVE_KMH:
++                    moved = True
++                    break
++        finally:
++            self._kb.end_relearn_blip()
++            self._relearn_blip_active = False
++        if learned:
++            rpm = self._rev_limiter.dump(ck)
++            self._set_relearn_status("learned", rpm)
++            print(f"[Relearn] fuel cut learned: {rpm:.0f} rpm")
++        elif moved:
++            self._set_relearn_status("aborted_moved")
++            print("[Relearn] aborted: car moved — clutch did not disengage. "
++                  "Set the game transmission to Manual or Manual w/ Clutch (not Automatic).")
++        else:
++            self._set_relearn_status("timeout")
++            print("[Relearn] timed out before locking the fuel cut; try again while parked.")
+ 
+     def _resolve_pending_upshift(self, td: Telemetry, now: float) -> None:
+         """Clear or cap upshift targets once the game confirms or rejects a shift."""
+@@ -608,6 +700,8 @@ class TCULogic:
+                     "power_curve_learned": False,
+                     "crossover_relearning": False,
+                     "crossover_learned": False,
++                    "relearn_status": None,
++                    "relearn_status_rpm": None,
+                     "learn_mature_gears": 0,
+                     "learn_target_gears": 0,
+                     "learn_progress": 0.0,
+@@ -654,6 +748,12 @@ class TCULogic:
+                 "power_curve_learned": self._power_curve.has_data(td.car_key),
+                 "crossover_relearning": time.monotonic() < self._crossover_relearn_until,
+                 "crossover_learned": crossover_learned,
++                "relearn_status": (
++                    self._relearn_status
++                    if time.monotonic() < self._relearn_status_until
++                    else None
++                ),
++                "relearn_status_rpm": self._relearn_status_rpm,
+                 "learn_mature_gears": mature_gears,
+                 "learn_target_gears": target_gears,
+                 "learn_progress": learn_progress,
+@@ -687,6 +787,7 @@ class TCULogic:
+ 
+     def _process_internal(self, td: Telemetry, raw_packet: bytes | None):
+         now = time.time()
++        self._last_td = td
+ 
+         is_race_now = bool(td.is_race_on)
+         self._was_race_on = is_race_now
+@@ -971,7 +1072,7 @@ class TCULogic:
+             self._no_downshift_until = max(self._no_downshift_until, now + downshift_lock_s)
+         self._we_shifted = True
+         self._shift_count += 1
+-        self._kb.shift_to(td.gear, td.gear + 1)
++        self._shift_to(td.gear, td.gear + 1)
+         self._logger.mark_event()
+         self._shift_history.record("UP", td, reason=state, rule=self.mode.value, sent_at=now)
+         self._session_stats.record_shift("UP", state)
+@@ -1023,7 +1124,7 @@ class TCULogic:
+         self._we_shifted = True
+         self._shift_count += 1
+         self._last_downshift_time = now
+-        self._kb.shift_to(td.gear, td.gear - 1)
++        self._shift_to(td.gear, td.gear - 1)
+         self._logger.mark_event()
+         self._shift_history.record("DOWN", td, reason=state, rule=self.mode.value, sent_at=now)
+         self._session_stats.record_shift("DOWN", state)
+@@ -1054,7 +1155,7 @@ class TCULogic:
+         self._we_shifted = True
+         self._shift_count += 2
+         self._last_downshift_time = now
+-        self._kb.shift_to(td.gear, target)
++        self._shift_to(td.gear, target)
+         self._logger.mark_event()
+         self._shift_history.record(
+             "DOWN",
+-- 
+2.43.0
+
