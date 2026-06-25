@@ -230,10 +230,17 @@ class TCULogic:
         base = car_key_base(td)
         if base[0] <= 0:
             return
+        prev_sig = self._active_tune_signature
         if base not in self._tune_id_by_base:
             self._tune_id_by_base[base] = td.tune_signature
         td.profile_tune_id = self._tune_id_by_base[base]
         self._active_tune_signature = td.tune_signature
+        # When the engine config (cam / displacement / swap) changes across
+        # tunes on the same car, the saved transmission-type detection may
+        # no longer apply — drop it so the next upshift re-tests.
+        if prev_sig is not None and prev_sig != td.tune_signature:
+            ck = td.car_key
+            self._racing_transmission.pop(ck, None)
 
     def _clear_learning_for_key(self, ck: tuple) -> None:
         self._calibrator._ratios.pop(ck, None)
@@ -360,6 +367,9 @@ class TCULogic:
             self._cap_confirm.pop(ck, None)
             self._max_gear_seen.pop(ck, None)
             self._gear_plateau_s.pop(ck, None)
+            # Also reset transmission-type detection so a new no-clutch test
+            # fires on the next upshift (the tune may have a different gearbox).
+            self._racing_transmission.pop(ck, None)
             # Persisted: strip the relearned blocks (incl. rev limiter) so they
             # don't reload; keep the rest of the profile (metadata).
             profile = self._profiles.get(ck)
