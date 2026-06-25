@@ -161,6 +161,13 @@ class TCULogic:
         self._detect_neutral_frames = 0
         self._detect_deadline = 0.0
 
+        # Frozen-telemetry detection (results screen after race finish).
+        # FH6 sends the last frame's data on loop — is_race_on=1, speed≈0,
+        # gear frozen at finish-line gear.  Without this guard the TCU
+        # endlessly tries to downshift at standstill into a dead game.
+        self._frozen_since: float | None = None
+        self._frozen_key: tuple | None = None
+
         self._reverse_hold = ReverseHoldDetector(kb)
         self._calibrator = GearRatioCalibrator()
         self._power_curve = PowerCurveDetector()
@@ -924,6 +931,29 @@ class TCULogic:
 
         is_race_now = bool(td.is_race_on)
         self._was_race_on = is_race_now
+
+        # Detect frozen telemetry — FH6 results screen re-sends the last
+        # frame on loop (gear / rpm / speed frozen, is_race_on=1).  Once
+        # frozen for 3 s, suppress ALL shifts until telemetry changes again.
+        if is_race_now and td.speed_kmh < 1.0:
+            fk = (td.gear, round(td.current_rpm / 10), round(td.speed_ms * 100))
+            if fk == self._frozen_key:
+                if self._frozen_since is not None and (now - self._frozen_since) > 3.0:
+                    self._tcu_state = "RESULTS"
+                    self._tcu_state_sub = "race finished (frozen)"
+                    if not getattr(self, "_frozen_printed", False):
+                        print("[Frozen] telemetry stalled — race finished, suppressing shifts")
+                        self._frozen_printed = True
+                    return
+            else:
+                self._frozen_since = now
+                self._frozen_key = fk
+        else:
+            self._frozen_since = None
+            self._frozen_key = None
+            if getattr(self, "_frozen_printed", False):
+                print("[Frozen] recovered — telemetry live again")
+                self._frozen_printed = False
 
         dt = now - self._last_packet_time if self._last_packet_time > 0.0 else 0.016
         dt = max(0.001, min(dt, 0.100))

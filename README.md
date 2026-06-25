@@ -81,6 +81,7 @@
 - 修复中文输入法拦截换挡键导致自动升档永久卡死的问题：IME 吞掉注入的 E/Q 键后，TCU 的升档超时逻辑将"游戏无响应"误解为"到达最高档位"，`upshift_cap` 降为 1 档并 sticky 锁定。修复：新增 `UPSHIFT_CAP_MIN_FLOOR=2`（cap 永不降到 2 档以下）和 `UPSHIFT_CAP_CONFIRM_FROM_GEAR=3`（3 档以下不计入 sticky 确认计数），防止 IME/失焦等瞬时干扰导致永久死锁。
 - 修复 F7 重学不清除变速箱类型检测结果的问题：`reset_crossover_learning` 补充了 `_racing_transmission.pop()`。
 - 修复同车切换调校后变速箱类型不重新检测的问题：`_sync_profile_tune_id` 检测到 `tune_signature` 变化时自动清除旧的检测结果。
+- 修复冲线后结算画面疯狂降档的问题：FH6 在比赛结束后 UDP 冻结最后一帧数据（`is_race_on=1`, `speed≈0`, `gear` 保持冲线挡位），TCU 误判为静止高档位触发 `STANDSTILL` 降档死循环。修复：新增遥测冻结检测，连续 3 秒数据无变化即停止换挡，回到自由漫游后自动恢复。
 
 ---
 
@@ -90,7 +91,7 @@
 |------|------|
 | `virtual_tcu/config/constants.py` | `feat_clutch_assist=true`, `clutch_pre_ms=5`, 新增 `feat_rev_blip`/`blip_key`/`blip_ms`/`hotkey_toggle_clutch`, `udp_port=5300`, `feat_relearn_blip=true`, `UPSHIFT_CAP_MIN_FLOOR`, `UPSHIFT_CAP_CONFIRM_FROM_GEAR` |
 | `virtual_tcu/input/keyboard_output.py` | 新增 `shift_no_clutch()`, `_press_release_with_blip()`, `use_blip` 自动关联 `feat_clutch_assist` |
-| `virtual_tcu/logic/tcu.py` | 换挡方式检测（单阈值 `≤5`）, `_shift_to()` 分流, profile 持久化, `_split_tune_profile` 继承检测结果, snapshot 推送 `clutch_assist_enabled` / `transmission_type`, `_resolve_pending_upshift` IME 干扰修复, F7 清除变速箱类型, 调校切换自动清除 |
+| `virtual_tcu/logic/tcu.py` | 换挡方式检测（单阈值 `≤5`）, `_shift_to()` 分流, profile 持久化, `_split_tune_profile` 继承检测结果, snapshot 推送 `clutch_assist_enabled` / `transmission_type`, `_resolve_pending_upshift` IME 干扰修复, F7 清除变速箱类型, 调校切换自动清除, 遥测冻结检测（冲线后停止换挡） |
 | `virtual_tcu/app.py` | 新增 F10 热键, `clutch_assist_enabled()` / `toggle_clutch_assist()` |
 | `virtual_tcu/web/server.py` | aiohttp charset 兼容修复 |
 | `packages/shared/src/config/settings.ts` | `feat_rev_blip` 从 `FEATURE_TOGGLES` 移除（移至离合辅助区）, `HOTKEY_FIELDS` 新增 `hotkey_toggle_clutch` |
