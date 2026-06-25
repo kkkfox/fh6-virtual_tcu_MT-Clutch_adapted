@@ -1,8 +1,31 @@
-# VirtualTCU 13.8.2 修改日志
+# VirtualTCU 13.8.3 修改日志
 
 基于上游 `fh6-virtual_tcu_evolution` v13.7.x 修改。
 
 ---
+
+## 13.8.3 更新
+
+### 变速箱类型检测逻辑重构
+
+彻底重写 `_detect_transmission_frame`，修复三类导致检测永久失败的问题。
+
+- **原有逻辑**：统计无离合升档过程中 `gear=11`（空档）的帧数，`≤5` 判序列箱，`≥6` 判离合箱。超时只清标志不复位。
+
+- **致命缺陷**：
+  1. **RevLimiter 干扰**：TCU 内部的 RevLimiter 在学习断油转速后改写 `td.engine_max_rpm` → `car_key` 变化 → 检测函数的 `car_key` 比对失败 → 直接 abort（不分类、不超时也不记录）
+  2. **超时不死**：2 秒超时分支只 `_detect_active = None; return`，不写 `_racing_transmission`，`_shift_to` 看到 `trans_type is still None` → 下一升档重新发起 → 再次死循环
+  3. **空档跳帧**：部分序列箱换挡极快（1 帧完成），gear 直接从原档位跳到目标档位，永不经过 gear=11 → 帧数始终为 0 → 永不触发分类
+
+- **新逻辑**：统计从发令到档位变化的**总帧数**（不依赖 gear=11），超时直接判为离合箱。
+  - `gear` 在 `[1, 10]` 内且 ≠ 起始档位 → 分类
+  - 总帧数 `≤5` → 序列换挡
+  - 总帧数 `≥6` 或 2 秒未变化 → 离合换挡
+  - 移除 `car_key` 比对，不再受 RevLimiter 干扰
+
+| 文件 | 改动 |
+|------|------|
+| `virtual_tcu/logic/tcu.py` | `_detect_transmission_frame` 完全重写, `_detect_total_frames` 替代 `_detect_neutral_frames`, 新增 `_detect_from_gear`, 移除 car_key 比对, 超时分支写 `_racing_transmission=False` |
 
 ## 新增功能
 

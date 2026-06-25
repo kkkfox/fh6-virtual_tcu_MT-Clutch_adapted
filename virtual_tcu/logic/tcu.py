@@ -159,7 +159,8 @@ class TCULogic:
         self._racing_transmission: dict[tuple, bool] = {}
         # Active detection state; only one can be in-flight per car.
         self._detect_active: tuple | None = None
-        self._detect_neutral_frames = 0
+        self._detect_total_frames = 0
+        self._detect_from_gear = 0
         self._detect_deadline = 0.0
 
         # Frozen-telemetry detection (results screen after race finish).
@@ -292,7 +293,8 @@ class TCULogic:
                 # First upshift on unknown car → send test shift without clutch
                 print(f"[Shift] {from_gear}→{target_gear} {arrow} — init transmission detection (no clutch)")
                 self._detect_active = ck
-                self._detect_neutral_frames = 0
+                self._detect_total_frames = 0
+                self._detect_from_gear = from_gear
                 self._detect_deadline = time.monotonic() + 2.0
                 self._kb.shift_no_clutch(from_gear, target_gear)
                 return
@@ -307,38 +309,34 @@ class TCULogic:
         self._kb.shift_to(from_gear, target_gear)
 
     def _detect_transmission_frame(self, td: Telemetry) -> None:
-        """Per-frame: count gear=11 (neutral) frames to classify the gearbox.
+        """Per-frame: classify gearbox by timing a no-clutch upshift.
 
-        Detection sends a no-clutch upshift and times neutral-frame count.
-        Racing / sequential boxes finish in 1 frame (10 ms).  Normal boxes
-        without clutch take 10-15 frames (165 ms).  Some sport boxes fall
-        in 4-5 frames but still match or beat a clutched shift, so the
-        threshold is set at 6: ≤5 = sequential, ≥6 = needs clutch.
-        This is called from _process_internal before other logic."""
+        Count total telemetry frames from shift-initiation until gear
+        actually changes.  Sequential boxes shift in 1-5 frames (with or
+        without a sampled neutral); clutch boxes without clutch either
+        take longer or fail to shift at all (timeout → clutch)."""
         if self._detect_active is None:
             return
-        if td.car_key != self._detect_active:
-            self._detect_active = None
-            return
+
+        self._detect_total_frames += 1
+
         if time.monotonic() > self._detect_deadline:
-            # 2 s timeout — shift was never recognized, retry on next upshift
+            # 2 s timeout with no gear change → clutch (shift never moved).
+            ck = self._detect_active
+            self._racing_transmission[ck] = False
+            print(f"[TransDetect] clutch (timeout, {self._detect_total_frames} frames no change)")
             self._detect_active = None
             return
 
-        if td.gear == 11:
-            self._detect_neutral_frames += 1
-        elif self._detect_neutral_frames > 0:
-            # Just exited neutral → classify
-            n = self._detect_neutral_frames
+        if 1 <= td.gear <= 10 and td.gear != self._detect_from_gear:
+            n = self._detect_total_frames
             ck = self._detect_active
-
             if n <= 5:
                 self._racing_transmission[ck] = True
                 print(f"[TransDetect] sequential ({n} frames)")
             else:
                 self._racing_transmission[ck] = False
                 print(f"[TransDetect] clutch ({n} frames)")
-
             self._detect_active = None
 
     def reset_crossover_learning(self) -> bool:
