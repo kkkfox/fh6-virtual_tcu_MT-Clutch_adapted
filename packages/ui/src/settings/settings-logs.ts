@@ -154,6 +154,35 @@ export function useSettingsLogs(ctx: SettingsContext) {
     })
     terminal.open(terminalHost.value)
     terminal.resize(120, 24)
+
+    // Click-to-focus the terminal so mouse selection works.
+    const hostEl = terminalHost.value
+    if (hostEl) {
+      hostEl.addEventListener('mousedown', () => terminal?.focus(), { once: false })
+    }
+
+    // Allow Ctrl+C to copy selected text from the read-only terminal.
+    terminal.attachCustomKeyEventHandler((e: KeyboardEvent) => {
+      if (e.ctrlKey && e.key === 'c' && terminal?.hasSelection()) {
+        const sel = terminal.getSelection()
+        if (sel) {
+          navigator.clipboard.writeText(sel).catch(() => {
+            // Fallback: write to a temporary textarea (older Electron / HTTP).
+            const ta = document.createElement('textarea')
+            ta.value = sel
+            ta.style.position = 'fixed'
+            ta.style.opacity = '0'
+            document.body.appendChild(ta)
+            ta.select()
+            document.execCommand('copy')
+            document.body.removeChild(ta)
+          })
+        }
+        return false
+      }
+      return true
+    })
+
     renderActiveView()
   }
 
