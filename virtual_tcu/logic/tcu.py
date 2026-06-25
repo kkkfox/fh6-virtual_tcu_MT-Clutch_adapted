@@ -149,6 +149,7 @@ class TCULogic:
         self._profile_baseline_ratios: dict[tuple, dict[int, float]] = {}
         self._drift_streak: dict[tuple, dict[int, int]] = {}
         self._active_tune_signature: int | None = None
+        self._prev_base: tuple | None = None
         self._was_race_on = False
 
         # Racing transmission detection (per-car, persisted in profile).
@@ -238,14 +239,17 @@ class TCULogic:
         if base[0] <= 0:
             return
         prev_sig = self._active_tune_signature
+        prev_base = self._prev_base
         if base not in self._tune_id_by_base:
             self._tune_id_by_base[base] = td.tune_signature
         td.profile_tune_id = self._tune_id_by_base[base]
         self._active_tune_signature = td.tune_signature
+        self._prev_base = base
         # When the engine config (cam / displacement / swap) changes across
-        # tunes on the same car, the saved transmission-type detection may
+        # tunes on the *same* car, the saved transmission-type detection may
         # no longer apply — drop it so the next upshift re-tests.
-        if prev_sig is not None and prev_sig != td.tune_signature:
+        # Cross-car switches are handled separately by _load_profiles.
+        if prev_sig is not None and prev_sig != td.tune_signature and prev_base == base:
             ck = td.car_key
             self._racing_transmission.pop(ck, None)
 
@@ -381,7 +385,7 @@ class TCULogic:
             # don't reload; keep the rest of the profile (metadata).
             profile = self._profiles.get(ck)
             if isinstance(profile, dict):
-                for stale in ("gear_ratios", "gear_counts", "power_curve", "rev_limiter"):
+                for stale in ("gear_ratios", "gear_counts", "power_curve", "rev_limiter", "racing_transmission"):
                     profile.pop(stale, None)
                 self._profiles.set(ck, profile)
             self._crossover_relearn_until = time.monotonic() + CROSSOVER_RELEARN_FLASH_S
