@@ -1,491 +1,139 @@
-# Virtual TCU — Forza Horizon 6
+# VirtualTCU 13.8.2 修改日志
 
-<div align="center">
-
-[![Release](https://img.shields.io/github/v/release/Forza-Love/fh6-virtual_tcu?label=release&sort=semver)](https://github.com/Forza-Love/fh6-virtual_tcu/releases)
-[![CI](https://img.shields.io/github/actions/workflow/status/Forza-Love/fh6-virtual_tcu/ci.yml?branch=main&label=CI)](https://github.com/Forza-Love/fh6-virtual_tcu/actions/workflows/ci.yml)
-[![License](https://img.shields.io/github/license/Forza-Love/fh6-virtual_tcu)](LICENSE)
-[![Discord](https://img.shields.io/discord/1508360305712037988?label=Discord&color=5865F2)](https://discordapp.com/invite/ghj3PGe9)
-[![GitHub stars](https://img.shields.io/github/stars/Forza-Love/fh6-virtual_tcu?style=social)](https://github.com/Forza-Love/fh6-virtual_tcu/stargazers)
-
-<br>
-
-[![Windows](https://img.shields.io/badge/platform-Windows%2010%2F11-0078D6?logo=windows&logoColor=white)](#quick-start)
-[![Node.js](https://img.shields.io/badge/node-%3E%3D24.0.0-339933?logo=node.js&logoColor=white)](package.json)
-[![pnpm](https://img.shields.io/badge/pnpm-10.33-F69220?logo=pnpm&logoColor=white)](package.json)
-[![Python](https://img.shields.io/badge/python-%3E%3D3.12-3776AB?logo=python&logoColor=white)](pyproject.toml)
-[![Vue](https://img.shields.io/badge/vue-3.5-4FC08D?logo=vuedotjs&logoColor=white)](apps/dashboard/package.json)
-[![Electron](https://img.shields.io/badge/electron-42-47848F?logo=electron&logoColor=white)](package.json)
-[![TypeScript](https://img.shields.io/badge/TypeScript-5.9-3178C6?logo=typescript&logoColor=white)](package.json)
-[![Ruff](https://img.shields.io/badge/Ruff-lint%20%2B%20format-D7FF64?logo=ruff&logoColor=black)](pyproject.toml)
-
-<br>
-
-[![FH6](https://img.shields.io/badge/game-Forza%20Horizon%206-E10600?logo=xbox&logoColor=white)](#forza-horizon-6--in-game-setup-one-time)
-[![i18n](https://img.shields.io/badge/i18n-en%20%7C%20zh--CN-22c55e)](apps/dashboard/)
-[![output](https://img.shields.io/badge/output-keyboard%20%7C%20vJoy-64748b)](#3-vjoy-mode-optional)
-
-**English · [简体中文](README.zh-CN.md)**
-
-</div>
-
-> This project's core functionality is provided by **Insightful**, maintained for the [**Forza Mods**](https://discord.gg/forzamods) Discord community.
-
-An external adaptive transmission controller for *Forza Horizon 6*. It reads real-time UDP telemetry from the game, decides when to shift based on driving style, throttle, RPM, speed, and brake input, and injects shift commands — **keyboard keys** (E/Q) or **virtual vJoy buttons** (DirectInput).
-
-**v13** ships as a Windows tray app (Electron) with a floating HUD and auto-update. The live telemetry dashboard runs in your browser at **http://127.0.0.1:8765** (English / 简体中文). A portable Python-only build is still available for users who prefer no Electron.
-
-| | |
-| :-- | :-- |
-| 🚗 **4 drive modes + Manual** | Comfort · Race · Drift · Off-road (Comfort/Race adapt via drive-style) |
-| 🧠 **Per-car learning** | Gear ratios, power curve, rev limiter, sport index |
-| 📡 **60 Hz TCU loop** | UDP telemetry in → shift logic → keyboard / vJoy out |
-| 🖥️ **Desktop shell** | Tray app, Settings window, floating HUD, browser dashboard |
-| 🔄 **One-click updates** | `electron-updater` ships Electron + Python backend together |
-
-```mermaid
-flowchart LR
-  FH6["Forza Horizon 6"] -->|"UDP :5555"| TCU["Virtual TCU\n(Python)"]
-  TCU -->|"E/Q or vJoy"| FH6
-  TCU -->|"WS :8765"| UI["Dashboard / HUD\n(Vue + Electron)"]
-```
+> 基于上游 [fh6-virtual_tcu_evolution](https://github.com/qq00qq00/fh6-virtual_tcu_evolution) v13.7.x 修改。
+> [查看原版 README](README_ORIGINAL.md)
 
 ---
 
-## Quick start
+## 新增功能
 
-| I want to… | Use |
-|------------|-----|
-| Play — tray app, HUD overlay & auto-update | [Download Electron installer](#download--use-electron-installer) |
-| Play — Python backend only, no Electron | [Download backend-only zip](#download--use-backend-only-zip) |
-| Develop or run from this repo | [Run from source](#run-from-source) |
-| Change the Vue UI | [apps/dashboard/README.md](apps/dashboard/README.md) |
+### 变速箱类型自动检测（手离模式）
 
-**Platform:** Windows 10 / 11 only. Run as **Administrator** (required for global key injection).
+在手动含离合模式下，TCU 首次升档时自动检测变速箱类型，区分 **序列换挡** 与 **离合换挡**。
 
----
+- **核心思路**：以"效率"为判定标准 — 检测阶段发无离合升档，如果此时换挡速度不慢于按离合的换挡速度，归入序列换挡（不按离合）；否则归入离合换挡。
+- **实测数据（60Hz UDP 帧，16.7ms/帧）**：
 
-## Download & use (Electron installer)
+  | 变速箱 | 按离合换挡 | 不按离合换挡 |
+  |--------|:----------:|:------------:|
+  | 赛用变速箱 | 1 帧 (10ms) | 1 帧 (10ms) |
+  | 运动型变速箱 | — | 4-5 帧 (~70ms) |
+  | 普通变速箱 | 5-6 帧 (60-67ms) | 15 帧 (165ms) |
 
-Recommended for most users. Single installer that bundles the Python backend, provides a **Settings** window for configuration, a **read-only browser dashboard** for live telemetry, an optional **HUD overlay**, and **auto-update**.
+- **判定阈值**：无离合升档时 `gear=11` 的帧数
+  - `neutral_frames ≤ 5` → **序列换挡**（不按离合换挡速度不慢于按离合）
+  - `neutral_frames ≥ 6` → **离合换挡**（不按离合明显慢，需要离合）
+  - 2 秒超时未进入空档 → 放弃本次，下次升档重试
+- **关键结论**：运动型变速箱（如 3363 的一类车）不按离合仅 4-5 帧，按离合也是 5-6 帧，不按离合反而不慢，归入序列换挡。普通变速箱不按离合高达 15 帧，和按离合的 5-6 帧差距悬殊（166ms vs 64ms），不可能被误判。
+- **帧数基准**：FH6 UDP 遥测固定 ~60Hz，与游戏渲染帧率无关，判定不受 FPS 影响。
+- **UI 显示**：
+  - 悬浮窗：绿色 `SEQ` / 黄色 `CLT` / 灰色 `—`
+  - Web UI 侧栏：换挡方式：序列换挡 / 离合换挡 / 未识别
+- **效果**：
+  - **序列换挡**：后续升档/降档不按离合，换挡仅需 40ms。
+  - **离合换挡**：正常按离合换挡，时序由 `clutch_pre_ms` / `clutch_overlap_ms` / `clutch_release_ms` 控制。
+- **检测结果持久化**到 `tcu_profiles.json`（`racing_transmission` 字段），同一调校只检测一次。
+- **调校切换**：更换调校时自动继承旧调校的检测结果（同一辆车不会因调校 ID 变化而重新检测）。
+- **已知限制**：倒档不参与检测，挂倒档仍需按离合。
 
-### 1. Download
+### 降档补油 (Rev-Match Blip)
 
-Open **[GitHub Releases](https://github.com/Forza-Love/fh6-virtual_tcu/releases)** and download the latest `VirtualTCU-*-win64.exe`.
+手离模式下降档时自动短踩油门匹配发动机转速，减少顿挫。
 
-### 2. Install & launch
+- 新增配置项：
+  - `feat_rev_blip`: 降档补油开关，**当 `feat_clutch_assist` 开启时默认强制启用**。
+  - `blip_key`: 补油按键，默认 `w`。
+  - `blip_ms`: 补油时长，默认 `70ms`（范围 20-150ms）。
+- 补油时序（普通变速箱）：离合按下 → 等 `clutch_pre_ms` → 降档键与油门同时按下 → 等 `blip_ms` → 先松油门 → 松降档键 → 等 `clutch_release_ms` → 松离合。
+- 补油时序（赛用变速箱）：降档键与油门同时按下 → 等 `blip_ms` → 松油门 → 松降档键（无离合参与）。
+- 设置界面已加入降档补油开关及参数调整。
+- **UI 调整**：降档补油开关和补油时长滑块已从"功能开关"卡片移至「离合辅助」展开区（离合键输入框下方），方便集中管理离合相关参数。
+- 降档补油逻辑改为独立读取 `feat_rev_blip`，F10 热键一键同步离合辅助和降档补油，之后可在 UI 中分别手动覆盖。
+- 换挡方式显示仅在离合辅助开启时可见，关闭时自动隐藏对应 UI 行。
 
-Run the installer (Administrator is requested on launch). It registers a Start Menu / desktop shortcut and creates a **system tray icon** on first start.
+### F10 离合辅助热键 + 悬浮窗状态显示
 
-On launch the app:
-
-1. Starts the bundled Python backend in the background.
-2. Opens the **Settings** window (drive modes, tuning, network, stats, updater, etc.).
-3. Keeps running in the tray when you close the Settings window.
-
-**Tray menu:**
-
-| Item | Action |
-|------|--------|
-| **Settings** | Open / focus the Settings window |
-| **Open Dashboard in Browser** | Open the live telemetry dashboard (`http://127.0.0.1:8765`) |
-| **Toggle HUD** | Show / hide the floating overlay (gear / mode / RPM / speed) |
-| **Restart Backend** | Restart the Python backend without quitting the app |
-| **Quit** | Exit completely |
-
-Left-click the tray icon also opens **Settings**.
-
-**Auto-update** checks GitHub Releases shortly after launch and downloads new versions in the background. The full Electron + Python bundle updates as one package (see **About** tab in Settings).
-
-### 3. vJoy mode (optional)
-
-By default, the TCU injects keyboard keys (**E** upshift / **Q** downshift), which works for keyboard, controller, and racing-wheel players alike (a discrete key never overrides your analog steering / throttle).
-
-If you prefer a virtual DirectInput device instead — useful for racing wheels, since vJoy shifts don't interrupt force feedback — switch to vJoy mode in **Settings → Extras → Output mode**. This requires the **[vJoy](https://github.com/BrunnerInnovation/vJoy/releases) driver** installed with device #1 enabled, and the matching gear/sequential buttons bound in FH6.
-
-> A virtual XInput "gamepad" output mode existed in older versions but was **removed**: as a second XInput device it sent a full controller-state packet on every shift, zeroing the player's steering/throttle and making cornering feel laggy. Use keyboard (default) or vJoy instead.
-
-### 4. Play
-
-Configure FH6 once ([in-game setup](#forza-horizon-6--in-game-setup-one-time)), then:
-
-1. Open **Settings** → pick a drive mode and adjust options as needed.
-2. Tray → **Open Dashboard in Browser** (or the button on the Settings **Overview** tab) for the live view.
-3. Optionally tray → **Toggle HUD** for the in-game overlay.
-4. Start a race — the dashboard and HUD go **live** when telemetry arrives.
-
-### 5. Quit
-
-Tray icon → **Quit**.
-
-### Where Electron data is stored
-
-The bundled backend saves config, profiles, and logs next to `VirtualTCU.exe` inside the install's `resources/backend/` folder (portable-style). If that folder is not writable (e.g. under `C:\Program Files\`), data falls back to **`%APPDATA%\VirtualTCU\`**.
-
-| Item | Default (Electron) |
-|------|---------------------|
-| Settings | `resources\backend\tcu_config.json` or `%APPDATA%\VirtualTCU\tcu_config.json` |
-| Per-car profiles | same folder / `tcu_profiles.json` |
-| Telemetry replay logs | same folder / `logs\` |
-| Crash log (if startup fails) | same folder / `crash.log` |
+- 新增 `F10` 全局热键，快速开关离合辅助，终端输出 `[Clutch] ON/OFF`。
+- 开关同步 `feat_clutch_assist` 和 `vjoy_use_clutch`，避免状态不一致。
+- 悬浮窗（Electron HUD）顶部新增红色/灰色 `CLUTCH ON/OFF` 小标签。
+- 设置界面热键列表新增 `F10 切换离合`。
 
 ---
 
-## Download & use (backend-only zip)
+## 配置默认值调整
 
-For users who want the original portable layout without Electron, HUD, or auto-update. The dashboard opens in your default browser and includes full settings (not view-only).
-
-### 1. Download
-
-`VirtualTCU-Backend-*-win64.zip` from **[GitHub Releases](https://github.com/Forza-Love/fh6-virtual_tcu/releases)**.
-
-### 2. Extract
-
-```
-VirtualTCU-Backend-13.2.x-win64/
-├── Launch VirtualTCU.bat    ← optional launcher (recommended)
-└── VirtualTCU/
-    ├── VirtualTCU.exe
-    └── _internal/           ← required; do not delete or move exe alone
-```
-
-### 3. Start
-
-Right-click **`Launch VirtualTCU.bat`** or **`VirtualTCU\VirtualTCU.exe`** → **Run as administrator**. A console opens; the browser may auto-open **http://127.0.0.1:8765**.
-
-### 4. Quit
-
-Focus the **console window** and press **`Ctrl + C`**, then close it. (**Do not** use **Q** — that's the in-game downshift key.)
-
-### Where backend-only data is stored
-
-Release builds save config, profiles, and logs **in the same folder as `VirtualTCU.exe`** (portable-style):
-
-```
-VirtualTCU/
-├── VirtualTCU.exe
-├── _internal/
-├── tcu_config.json
-├── tcu_profiles.json
-├── logs/
-│   └── tcu_replay_*.bin.gz
-└── .tcu_last_run
-```
-
-If the install folder is not writable (e.g. `C:\Program Files\`), data falls back to **`%APPDATA%\VirtualTCU\`** (the console shows which path is used on startup).
-
-| Item | Default (Release) |
-|------|-------------------|
-| Settings | `VirtualTCU\tcu_config.json` |
-| Per-car profiles | `VirtualTCU\tcu_profiles.json` |
-| Telemetry replay logs | `VirtualTCU\logs\` |
-| Crash log (if startup fails) | same folder as above / `crash.log` |
-
-### Telemetry recording
-
-**Electron users:** start / stop logging from the **Settings** window (Overview or sidebar controls).
-
-**Backend-only users:** use the Web UI sidebar — **Start logging (events)** or **Start logging (all)**, drive in FH6, then **Stop**.
-
-| Mode | What it records |
-|------|-----------------|
-| **Events** | Shift moments + short buffer (~0.5 MB typical) |
-| **All** | Every telemetry packet while recording (up to 10 MB auto-stop) |
-
-Files are named `tcu_replay_YYYYMMDD_HHMMSS.bin.gz` (gzip binary replay, not plain `.log`).
+| 配置项 | 原值 | 新值 | 说明 |
+|--------|------|------|------|
+| `feat_clutch_assist` | `false` | `true` | 默认启用手离模式 |
+| `feat_relearn_blip` | `false` | `true` | 默认启用 F7 断油学习 |
+| `clutch_key` | `shift` | `shift` | 保持不变；`/` 等符号键在 FH6 中无法通过 `keybd_event` 注入 |
+| `clutch_pre_ms` | `20` | `5` | 缩短离合预压时间 |
+| `udp_port` | `5555` | `5300` | 遥测端口 |
 
 ---
 
-## Run from source
+## Bug 修复
 
-For developers or anyone running from a git clone.
-
-### Prerequisites
-
-| Tool | Version | Notes |
-|------|---------|-------|
-| Python | 3.10+ | [Download](https://www.python.org/downloads/) — check **Add Python to PATH** |
-| Node.js | 18+ | Required for Vue dashboard build and Electron shell |
-
-### One-time setup
-
-Open **Administrator** Command Prompt or PowerShell:
-
-```bash
-cd path\to\virtualTCU
-pip install -r requirements.txt
-
-cd apps/dashboard
-pnpm install
-pnpm build
-cd ../..
-```
-
-`pnpm build` writes the dashboard to `virtual_tcu/web/dist/`. Without it, the backend returns HTTP **503** instead of the UI.
-
-### Option A — Electron shell (recommended)
-
-```bash
-cd apps/electron
-pnpm install
-pnpm dev
-```
-
-Or from the repo root: `packaging\dev-electron.bat`
-
-This launches the full Electron app, spawning `python -m virtual_tcu --backend-only` automatically. Re-runs reuse the PyInstaller exe at `dist/VirtualTCU/` if present (set `TCU_USE_FROZEN_BACKEND=1` to force it in dev).
-
-### Option B — Python backend only (browser UI)
-
-```bash
-cd path\to\virtualTCU
-python -m virtual_tcu
-```
-
-(`python virtual_tcu.py` also works.) Open **http://127.0.0.1:8765**, launch FH6, enter a race. Quit with **`Ctrl + C`**.
-
-### Where source-run data is stored
-
-When running from source, config / profiles / logs use the **project directory** (current working directory):
-
-```
-virtualTCU/
-├── tcu_config.json
-├── tcu_profiles.json
-└── logs/
-    └── tcu_replay_*.bin.gz
-```
-
-### Frontend dev (optional)
-
-Terminal 1 — backend:
-
-```bash
-python -m virtual_tcu
-```
-
-Terminal 2 — Vite hot reload:
-
-```bash
-cd apps/dashboard
-pnpm dev
-```
-
-Open **http://127.0.0.1:5173** (proxies WebSocket to port 8765). See [apps/dashboard/README.md](apps/dashboard/README.md).
-
-### Code quality (monorepo)
-
-The repo uses a pnpm workspace at the root. After `pnpm install`:
-
-| Command | Purpose |
-|---------|---------|
-| `pnpm lint` | ESLint (TS/Vue) + Ruff (Python) |
-| `pnpm lint:py` | Ruff check on `virtual_tcu/` |
-| `pnpm format` | Prettier + Ruff format |
-| `pnpm format:py` | Ruff format on `virtual_tcu/` |
-| `pnpm typecheck` | `vue-tsc` across workspace packages |
-
-Install Python dev tools (Ruff) with `uv sync --group dev` or `pip install -r requirements-dev.txt`. Run `pnpm lint:py` before submitting Python changes.
-
-### Build a Release locally (maintainers)
-
-```bash
-# 1. Vue dashboard
-cd apps/dashboard && pnpm install && pnpm build && cd ../..
-
-# 2. Python backend (PyInstaller onedir → dist/VirtualTCU/)
-pip install pyinstaller
-pyinstaller virtual_tcu.spec --noconfirm
-
-# 3. Electron installer (NSIS → apps/electron/release/VirtualTCU-*-win64.exe)
-cd apps/electron && pnpm install && pnpm package
-```
-
-Push a `v*` tag to trigger CI, which produces both the Electron installer (`VirtualTCU-*-win64.exe` + `latest.yml`) and the backend-only zip (`VirtualTCU-Backend-*-win64.zip`).
+- 修复 `aiohttp` 高版本下 `content_type="text/html; charset=utf-8"` 导致 `ValueError`，改为分离 `content_type` 和 `charset` 参数。
+- 修复 `_split_tune_profile` 创建新调校槽位时变速箱检测结果丢失的问题，现在新槽位继承旧槽位的 `racing_transmission` 值。
+- 修复离合键 `/` 在 FH6 中不生效的问题：`keyboard` 库的 `keybd_event` API 对符号键注入不可靠，改回 `shift`。
+- 修复 `_detect_transmission_frame` inconclusive 死循环：运动型变速箱不按离合 4-5 帧卡在判定区间导致反复重试，改为单阈值 `≤5` 判定。
+- 修复中文输入法拦截换挡键导致自动升档永久卡死的问题：IME 吞掉注入的 E/Q 键后，TCU 的升档超时逻辑将"游戏无响应"误解为"到达最高档位"，`upshift_cap` 降为 1 档并 sticky 锁定。修复：新增 `UPSHIFT_CAP_MIN_FLOOR=2`（cap 永不降到 2 档以下）和 `UPSHIFT_CAP_CONFIRM_FROM_GEAR=3`（3 档以下不计入 sticky 确认计数），防止 IME/失焦等瞬时干扰导致永久死锁。
+- 修复 F7 重学不清除变速箱类型检测结果的问题：`reset_crossover_learning` 补充了 `_racing_transmission.pop()`。
+- 修复同车切换调校后变速箱类型不重新检测的问题：`_sync_profile_tune_id` 检测到 `tune_signature` 变化时自动清除旧的检测结果。
 
 ---
 
-## Drive Modes
+## 修改文件清单
 
-| Mode | Behavior |
-|------|----------|
-| **COMFORT** | Eco-friendly shifts; with **drive-style** enabled, adapts between cruise efficiency, adaptive hold, and sportier response (replaces the old standalone Dynamic mode) |
-| **RACE** | Track-focused: near-redline upshifts, aggressive downshifts and engine braking; drive-style can push sportier behavior under hard driving |
-| **DRIFT** | Holds RPM in the power band, reduces unwanted downshifts mid-slide |
-| **OFFROAD** | Tuned for low grip and uneven terrain |
-| **MANUAL** | TCU disabled — you shift yourself |
-
-**F9** cycles **Comfort → Race → Drift → Off-road → Manual**. **F8** toggles logging. Both can be changed in Settings / the Web UI.
-
----
-
-## Forza Horizon 6 — In-Game Setup (one-time)
-
-### 1. Transmission
-
-**Settings → Difficulty → Transmission → MANUAL (No Clutch)** — enable **clutch assist** in Virtual TCU if you want the TCU to press the clutch key around shifts (keyboard or vJoy).
-
-### 2. Keyboard shift bindings
-
-**Settings → Controls → Keyboard**:
-
-| Action | Key |
-|--------|-----|
-| Shift Up | **E** |
-| Shift Down | **Q** |
-
-> Controller or wheel paddle bindings can stay **active at the same time**. The TCU only injects **E** / **Q** and does not take over throttle, steering, or other axes.
-
-### 3. Telemetry Data Out
-
-**Settings → HUD and Gameplay → Data Out**:
-
-| Option | Value |
-|--------|-------|
-| Data Out | **ON** |
-| IP Address | `127.0.0.1` |
-| Port | `5555` |
-| Packet Format | **Car Dash** (324 bytes) |
-
-> If you change the UDP port in Virtual TCU network settings, update FH6 to match.
+| 文件 | 改动 |
+|------|------|
+| `virtual_tcu/config/constants.py` | `feat_clutch_assist=true`, `clutch_pre_ms=5`, 新增 `feat_rev_blip`/`blip_key`/`blip_ms`/`hotkey_toggle_clutch`, `udp_port=5300`, `feat_relearn_blip=true`, `UPSHIFT_CAP_MIN_FLOOR`, `UPSHIFT_CAP_CONFIRM_FROM_GEAR` |
+| `virtual_tcu/input/keyboard_output.py` | 新增 `shift_no_clutch()`, `_press_release_with_blip()`, `use_blip` 自动关联 `feat_clutch_assist` |
+| `virtual_tcu/logic/tcu.py` | 换挡方式检测（单阈值 `≤5`）, `_shift_to()` 分流, profile 持久化, `_split_tune_profile` 继承检测结果, snapshot 推送 `clutch_assist_enabled` / `transmission_type`, `_resolve_pending_upshift` IME 干扰修复, F7 清除变速箱类型, 调校切换自动清除 |
+| `virtual_tcu/app.py` | 新增 F10 热键, `clutch_assist_enabled()` / `toggle_clutch_assist()` |
+| `virtual_tcu/web/server.py` | aiohttp charset 兼容修复 |
+| `packages/shared/src/config/settings.ts` | `feat_rev_blip` 从 `FEATURE_TOGGLES` 移除（移至离合辅助区）, `HOTKEY_FIELDS` 新增 `hotkey_toggle_clutch` |
+| `packages/shared/src/types/telemetry.ts` | 新增 `clutch_assist_enabled`, `transmission_type` |
+| `packages/shared/src/locales/zh-CN.ts` | 新增 `revBlip`, `toggleClutch`, `transmission`/`transType*`, `blipMs` 翻译 |
+| `packages/shared/src/locales/en.ts` | 同上英文翻译 |
+| `apps/dashboard/src/components/SettingsPanel.vue` | 离合辅助区新增降档补油开关 + 补油时长滑块 |
+| `apps/electron/src/hud-renderer/HudApp.ts` | 新增 `clutchAssistEnabled`, `transmissionType` ref/WS 读取 |
+| `apps/electron/src/hud-renderer/HudChrome.vue` | 新增 SEQ/CLT/— 换挡方式标签 + CLUTCH ON/OFF 标签; 换挡方式在离合辅助关闭时隐藏 |
+| `apps/electron/src/hud-renderer/templates/*.vue` | 传递 `clutchAssistEnabled`, `transmissionType` props |
+| `packages/ui/src/layout/ModeSidebar.vue` | 侧栏新增换挡方式显示; 离合辅助关闭时隐藏 |
+| `packages/ui/src/settings/SettingsAdvanced.vue` | 离合辅助区新增降档补油开关 + 补油时长滑块 |
+| `tcu_config.json` | 新增 `feat_rev_blip: true` |
+| `.npmrc` | 添加 npm 淘宝镜像源 |
 
 ---
 
-## Desktop app (Electron)
+## 使用说明
 
-| Window | Purpose |
-|--------|---------|
-| **Settings** | Full configuration — drive modes, sliders, hotkeys, network, stats, shift history, profile import/export, auto-update |
-| **Browser dashboard** | Read-only live view — gear, RPM chart, G-meter, session stats (opened via tray or Settings) |
-| **HUD overlay** | Always-on-top overlay with **Classic / Racing / Minimal** templates — arc or segmented tach, shift arrows, pedal gauge; click-through and pin |
+### 首次使用
 
-Closing the Settings window hides it; the app keeps running in the tray until you choose **Quit**.
+1. Settings → Advanced → 确保 **Clutch Assist** 已开启（默认开启）
+2. 游戏内 Difficulty → Transmission → **MANUAL (With Clutch)**
+3. 游戏内离合键绑定为左 `Shift`
+4. 第一次升档 TCU 自动检测换挡方式，终端输出 `[TransDetect] sequential/clutch` 检测结果
+5. 检测结果写入 `tcu_profiles.json`，之后换同车同调校不重复检测
+6. 按 `F10` 可随时开关离合辅助，浮动窗实时显示 `CLUTCH ON/OFF`
 
----
+### 序列换挡
 
-## Web Dashboard
+- 升档/降档：直接按 E/Q，不按离合
+- 降档补油开启时：自动短踩 W 补油
 
-When connected, the browser dashboard shows:
+### 离合换挡
 
-- **Gear / speed / RPM** — large gear readout, 20-segment RPM LED bar
-- **Live chart** — RPM, throttle, brake, and speed over time with shift markers
-- **G-meter** — lateral / longitudinal G ball with grip usage
-- **Pedals & inputs** — throttle, brake, clutch percentages
-- **TCU state** — cruising, kickdown, engine braking, airborne / yaw locks, etc.
-- **Turbo / engine** — boost (bar), power (kW), torque (Nm)
-- **Stats & shift history** — session counters, peaks, and recent shift log (right panel)
-- **Learning sidebar** — sport index, power-curve / ratio calibration status
+- 升档/降档：离合与换挡键按配置时序注入
+- 降档补油开启时：自动短踩 W 补油
+- 离合时序参数可在 `tcu_config.json` 或 Web UI 中调整：
+  - `clutch_pre_ms`：离合按下后等待多久再按换挡键
+  - `clutch_overlap_ms`：离合与换挡键同时按住的时长
+  - `clutch_release_ms`：换挡键松开后等多久再松离合
 
-In the **Electron** build the browser page is **view-only** (footer reminds you to use the desktop Settings app for configuration and logging). The **backend-only** build exposes full settings in the Web UI.
+### 已知限制
 
-Switch UI language in the page header (English / 简体中文).
-
----
-
-## Network settings
-
-Available in the Electron **Settings** window and the backend-only Web UI:
-
-| Setting | Default | Notes |
-|---------|---------|-------|
-| Web bind address | `127.0.0.1` | Set to `0.0.0.0` to allow LAN access from other devices on your network |
-| Web port | `8765` | Dashboard HTTP / WebSocket port |
-| UDP port | `5555` | Must match FH6 Data Out port |
-
-Click **Apply** to save. The backend hot-reloads bindings; if the web port changes, reopen the dashboard at the new URL shown in Settings.
-
----
-
-## Project layout (brief)
-
-```
-virtualTCU/
-├── virtual_tcu.py          # entry → virtual_tcu.app
-├── virtual_tcu/            # Python backend package
-├── apps/dashboard/         # Vue 3 + Tailwind v4 + Naive UI dashboard (served at :8765)
-├── apps/electron/          # Electron shell (tray, Settings, HUD, auto-update)
-│   ├── src/main/index.ts   # spawns backend, lifecycle, tray, IPC, autoUpdater
-│   ├── src/settings-renderer/  # Settings window (Naive UI)
-│   ├── src/hud-renderer/   # frameless transparent HUD overlay
-│   ├── src/preload/        # main + hud preload scripts
-│   └── electron-builder.yml
-├── packaging/              # Launch VirtualTCU.bat, dev-electron.bat
-├── virtual_tcu.spec        # PyInstaller spec (onedir → dist/VirtualTCU/)
-└── .github/workflows/      # Release CI (Vue → PyInstaller → electron-builder)
-```
-
----
-
-## Troubleshooting
-
-### Electron app starts but dashboard won't open
-
-- Tray → **Open Dashboard in Browser**, or Settings → **Overview** → open dashboard.
-- Confirm the backend is ready (Settings shows **live** / **standby**, not **disconnected**).
-- Tray → **Restart Backend** if the backend crashed.
-
-### Release exe flashes and closes (backend-only zip)
-
-- Extract the **full** zip — exe needs `_internal/` beside it.
-- Close other TCU instances (`python -m virtual_tcu` or another `VirtualTCU.exe`) — ports **5555** / **8765** are single-use per instance.
-- Run from cmd: `cd path\to\VirtualTCU` then `VirtualTCU.exe` (failed builds pause with an error).
-- Check **`crash.log`** in the data folder shown at startup (exe dir or `%APPDATA%\VirtualTCU\`).
-
-### Port already in use
-
-- Only one backend should run at a time. Quit other Virtual TCU instances or change ports in network settings.
-
-### Recording started but no log file found
-
-- Logs live in the backend data folder (`logs\` next to `VirtualTCU.exe` or `%APPDATA%\VirtualTCU\logs\`).
-- Click **Stop** before looking — the gzip file is finalized on stop.
-- Use **All** mode and drive in a race with Data Out ON; **Events** mode only writes meaningful data around shifts.
-- Look for `tcu_replay_*.bin.gz`, not `.log`.
-
-### Dashboard offline / waiting for Forza
-
-- Data Out **ON**, port **5555**, **Car Dash** format.
-- Must be **in a race** (no telemetry in menus).
-
-### TCU does not shift
-
-- Forza keyboard: Shift Up = **E**, Shift Down = **Q**.
-- Run as **Administrator**.
-
-### F9 / F8 hotkeys do nothing
-
-- Close apps that may capture those keys (Discord overlay, MSI Afterburner, etc.).
-
-### Wrong gear or speed
-
-- FH6 **324-byte Car Dash** only — not FH5 or Forza Motorsport.
-
-### Auto-update does nothing
-
-- Auto-update only runs in the **packaged** Electron installer, not in `npm run dev`.
-- Check the **About** tab in Settings for update status.
-
-### vJoy mode not working
-
-- Install the **[vJoy](https://github.com/BrunnerInnovation/vJoy/releases) driver** → reboot Windows → enable device #1.
-- Bind the gear / sequential shift buttons in FH6 to match the vJoy buttons configured in Settings → Extras.
-- Switch output mode back to **Keyboard** in Settings → Extras if you don't want to install vJoy — keyboard works for controllers and wheels too.
-
----
-
-## Notes
-
-- Works with any FH6 car — shift points auto-calibrate from telemetry max RPM.
-- **Reverse protection** — no automatic shifts in reverse.
-- **Low-speed protection** — no automatic shifts below ~12 km/h.
-- Only sends **E** / **Q** keyboard events; does not modify controller inputs.
-
----
-
-## Tested on
-
-- Windows 11
-- Steam edition of Forza Horizon 6
-- Xbox Elite Series 2 controller
-
-Telemetry based on the reverse-engineered FH6 **324-byte Car Dash** packet (confirmed via live diagnostics).
+- `/` 等符号键无法通过 `keyboard` 库注入到 FH6，离合键请用 `shift`、字母键或数字键
+- 倒档（R）不参与变速箱类型检测，挂倒档仍需手动按离合
