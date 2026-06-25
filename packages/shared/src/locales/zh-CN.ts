@@ -360,6 +360,7 @@ export default {
     clutchPreMs: '预压 ms',
     clutchOverlapMs: '重叠 ms',
     clutchReleaseMs: '松开 ms',
+    revBlip: '降档补油',
     blipMs: '补油时长 ms',
     outputMode: '输出模式',
     outputModeHint: '选择 TCU 向游戏发送换挡指令的方式。',

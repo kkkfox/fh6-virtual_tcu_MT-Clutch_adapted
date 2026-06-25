@@ -366,6 +366,7 @@ export default {
     clutchPreMs: 'Pre-shift ms',
     clutchOverlapMs: 'Overlap ms',
     clutchReleaseMs: 'Release ms',
+    revBlip: 'Rev-Match Blip',
     blipMs: 'Blip ms',
     outputMode: 'Output mode',
     outputModeHint: 'Choose how the TCU sends shift commands to the game.',
