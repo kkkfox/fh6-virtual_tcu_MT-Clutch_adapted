@@ -231,6 +231,7 @@ class KeyboardOutput(OutputInterface):
             keyboard.press(k)
             pressed_k = True
             if do_blip:
+                print(f"[RevBlip] {blip_key} blip {blip_s*1000:.0f}ms (clutch assist)")
                 keyboard.press(blip_key)
                 pressed_blip = True
                 time.sleep(blip_s)
@@ -274,6 +275,7 @@ class KeyboardOutput(OutputInterface):
 
             keyboard.press(k)
             pressed_k = True
+            print(f"[RevBlip] {blip_key} blip {blip_s*1000:.0f}ms (sequential)")
             keyboard.press(blip_key)
             pressed_blip = True
             time.sleep(blip_s)

@@ -161,6 +161,7 @@ class TCULogic:
         self._detect_active: tuple | None = None
         self._detect_total_frames = 0
         self._detect_from_gear = 0
+        self._detect_gear_moved = False
         self._detect_deadline = 0.0
 
         # Frozen-telemetry detection (results screen after race finish).
@@ -295,6 +296,7 @@ class TCULogic:
                 self._detect_active = ck
                 self._detect_total_frames = 0
                 self._detect_from_gear = from_gear
+                self._detect_gear_moved = False
                 self._detect_deadline = time.monotonic() + 2.0
                 self._kb.shift_no_clutch(from_gear, target_gear)
                 return
@@ -320,11 +322,21 @@ class TCULogic:
 
         self._detect_total_frames += 1
 
+        if td.gear != self._detect_from_gear:
+            self._detect_gear_moved = True
+
         if time.monotonic() > self._detect_deadline:
-            # 2 s timeout with no gear change → clutch (shift never moved).
+            if not self._detect_gear_moved:
+                # Gear never budged — shift key never reached the game
+                # (IME interception, focus lost, etc.). Don't classify;
+                # retry on the next upshift.
+                print(f"[TransDetect] retry — gear never moved ({self._detect_total_frames} frames, IME?)")
+                self._detect_active = None
+                return
+            # Gear moved but shift never completed → clutch box.
             ck = self._detect_active
             self._racing_transmission[ck] = False
-            print(f"[TransDetect] clutch (timeout, {self._detect_total_frames} frames no change)")
+            print(f"[TransDetect] clutch (timeout, {self._detect_total_frames} frames)")
             self._detect_active = None
             return
 

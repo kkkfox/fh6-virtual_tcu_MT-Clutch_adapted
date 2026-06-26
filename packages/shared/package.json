@@ -1,7 +1,7 @@
 {
   "name": "@virtual-tcu/shared",
   "type": "module",
-  "version": "13.8.3",
+  "version": "13.8.4",
   "private": true,
   "exports": {
     "./api/*": "./src/api/*",
